@@ -86,6 +86,11 @@ Also enable any **non-default extensions** on the target first (example-app uses
 
 ## Runbook
 
+**Full idiot-proof, verified, step-by-step procedure for example-app:
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md)** — including the connectivity decision, the auth/roles/
+extensions dump-restore pre-step, the billable target-creation step, and abort/rollback. The
+block below is the quick reference.
+
 ```bash
 # 0a. readiness checklist — connection shape (pooler vs direct), reachability,
 #     wal_level, replica identity, reconcile hashColumns ↔ live schema, stale

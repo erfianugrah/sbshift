@@ -20,7 +20,10 @@ import { watch } from "./steps/watch.ts";
 const program = new Command();
 program
   .name("sbmigrate")
-  .description("Cross-region Supabase migration orchestrator (logical replication)")
+  .description(
+    "Cross-region Supabase migration orchestrator (logical replication).\n" +
+      "Step-by-step runbook: docs/RUNBOOK.md. Start with `sbmigrate doctor`.",
+  )
   .option("-c, --config <path>", "path to migrate.config.yaml", "migrate.config.yaml");
 
 /** Run a step that needs DB connections, ensuring clients are always closed. */
