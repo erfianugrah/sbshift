@@ -1,0 +1,10 @@
+node_modules/
+*.log
+config_sync_*/
+ledger/
+*.ledger
+.env
+.env.*
+!.env.example
+dump/
+schema_dump/

@@ -1,0 +1,65 @@
+# Cross-region Supabase migration config.
+# Secrets (connection strings, access token) come from the environment — see .env.example.
+# Copy to migrate.config.yaml and edit.
+
+source:
+  ref: aaaaaaaaaaaaaaaaaaaa # SOURCE project ref (20 chars)
+target:
+  ref: bbbbbbbbbbbbbbbbbbbb # TARGET project ref (20 chars)
+
+replication:
+  publication: region_migration
+  slot: region_migration_slot
+  subscription: region_migration_sub
+  copyData: true # let the subscription do the consistent initial copy
+  tables: # FOR ALL TABLES needs superuser — always enumerate
+    - public.documents
+    - public.aliases
+
+reconcile:
+  tables:
+    # hashColumns omitted -> auto-detect all NON-generated columns.
+    # For documents we pin the list to make the search_vector exclusion explicit.
+    - name: public.documents
+      hashColumns:
+        [
+          id,
+          user_id,
+          content,
+          title,
+          language,
+          created_at,
+          expires_at,
+          updated_at,
+          visibility,
+          archived,
+          read_count,
+          is_encrypted,
+          view_limit,
+          version,
+          ref_token,
+        ]
+    - name: public.aliases
+  # inflight-loss proof for the rehearsal writer:
+  ledgerPath: ledger/written_ids.log
+  ledgerTable: public.documents
+  ledgerIdColumn: id
+
+watchdog:
+  maxRetainedWalMb: 2048 # abort watch if the slot bloats the source beyond this
+  pollIntervalSec: 5
+  syncTimeoutMin: 240
+
+configSync:
+  auth: true
+  realtime: true
+  postgrest: true
+  storage: true
+  dbPooler: true
+  dbPostgres: false # compute/disk are region/plan specific — usually leave off
+
+storage:
+  buckets: [] # example-app stores document bodies in Postgres, not Storage
+
+functions:
+  enabled: false # example-app runs on elsewhere, not Supabase Edge Functions

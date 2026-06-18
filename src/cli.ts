@@ -1,0 +1,140 @@
+#!/usr/bin/env bun
+import { Command } from "commander";
+import { type Config, loadConfig, loadSecrets } from "./config.ts";
+import { connect, type Db } from "./db.ts";
+import { log } from "./log.ts";
+import { MgmtApi } from "./mgmt.ts";
+import { seed } from "./rehearsal/seed.ts";
+import { writer } from "./rehearsal/writer.ts";
+import { transferFunctions, transferStorage } from "./steps/cli-wrappers.ts";
+import { configSync } from "./steps/config-sync.ts";
+import { cutover } from "./steps/cutover.ts";
+import { preflight } from "./steps/preflight.ts";
+import { reconcile } from "./steps/reconcile.ts";
+import { replicate } from "./steps/replicate.ts";
+import { teardown } from "./steps/teardown.ts";
+import { watch } from "./steps/watch.ts";
+
+const program = new Command();
+program
+  .name("sbmigrate")
+  .description("Cross-region Supabase migration orchestrator (logical replication)")
+  .option("-c, --config <path>", "path to migrate.config.yaml", "migrate.config.yaml");
+
+/** Run a step that needs DB connections, ensuring clients are always closed. */
+async function withDb(
+  fn: (db: { source: Db; target: Db }, cfg: Config) => Promise<void>,
+): Promise<void> {
+  const cfg = loadConfig(program.opts().config);
+  const secrets = loadSecrets();
+  const { source, target, close } = connect(secrets);
+  try {
+    await fn({ source, target }, cfg);
+  } catch (e) {
+    log.err(e instanceof Error ? e.message : String(e));
+    process.exitCode = 1;
+  } finally {
+    await close();
+  }
+}
+
+program
+  .command("preflight")
+  .description("read-only checks: versions, wal_level, subscribe grant, replica identity")
+  .action(() => withDb(({ source, target }, cfg) => preflight(source, target, cfg)));
+
+program
+  .command("replicate")
+  .description("create publication + slot + subscription (starts initial sync)")
+  .action(() => withDb(({ source, target }, cfg) => replicate(source, target, cfg, loadSecrets())));
+
+program
+  .command("watch")
+  .description("poll initial-sync state + WAL bloat watchdog until all tables ready")
+  .action(() => withDb(({ source, target }, cfg) => watch(source, target, cfg)));
+
+program
+  .command("reconcile")
+  .description("counts + content-hash + ledger check (run after writes stop & lag drains)")
+  .action(() =>
+    withDb(async ({ source, target }, cfg) => {
+      const ok = await reconcile(source, target, cfg);
+      if (!ok) process.exitCode = 1;
+    }),
+  );
+
+program
+  .command("cutover")
+  .description("drain lag to zero then drop the subscription (stop app writes FIRST)")
+  .option("--max-lag-wait <sec>", "seconds to wait for lag to drain", "300")
+  .action((o) =>
+    withDb(({ source, target }, cfg) =>
+      cutover(source, target, cfg, { maxLagWaitSec: Number(o.maxLagWait) }),
+    ),
+  );
+
+program
+  .command("teardown")
+  .description("drop subscription/slot/publication safely (idempotent)")
+  .action(() => withDb(({ source, target }, cfg) => teardown(source, target, cfg)));
+
+program
+  .command("config-sync")
+  .description("copy Auth/Realtime/Storage/etc config via Management API (secrets stripped)")
+  .option("--dry-run", "diff only, do not apply", false)
+  .action((o) => {
+    const cfg = loadConfig(program.opts().config);
+    const secrets = loadSecrets(true);
+    const api = new MgmtApi(secrets.SUPABASE_ACCESS_TOKEN as string);
+    api
+      .assertAccess([cfg.source.ref, cfg.target.ref])
+      .then(() => configSync(api, cfg, { dryRun: Boolean(o.dryRun) }))
+      .catch((e) => {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      });
+  });
+
+program
+  .command("functions")
+  .description("transfer Edge Functions via the supabase CLI")
+  .option("--dry-run", "print commands only", false)
+  .action((o) =>
+    transferFunctions(loadConfig(program.opts().config), { dryRun: Boolean(o.dryRun) }),
+  );
+
+program
+  .command("storage <localDir>")
+  .description("push downloaded storage objects to target buckets via the supabase CLI")
+  .option("--dry-run", "print commands only", false)
+  .action((dir, o) =>
+    transferStorage(loadConfig(program.opts().config), dir, { dryRun: Boolean(o.dryRun) }),
+  );
+
+// --- rehearsal harness ---
+const rehearse = program.command("rehearse").description("rehearsal data harness (test rig)");
+
+rehearse
+  .command("seed")
+  .description("seed the source documents table")
+  .option("--rows <n>", "row count", "100000")
+  .option("--payload <bytes>", "approx payload bytes per row", "6000")
+  .action((o) => withDb(({ source }, _cfg) => seed(source, Number(o.rows), Number(o.payload))));
+
+rehearse
+  .command("writer")
+  .description("continuous insert/update load with an append-only id ledger")
+  .option("--ledger <path>", "ledger file path", "ledger/written_ids.log")
+  .option("--interval <ms>", "ms between inserts", "50")
+  .option("--duration <sec>", "stop after N seconds (default: run until Ctrl-C)")
+  .action((o) =>
+    withDb(({ source }, _cfg) =>
+      writer(source, {
+        ledgerPath: o.ledger,
+        intervalMs: Number(o.interval),
+        durationSec: o.duration ? Number(o.duration) : undefined,
+      }),
+    ),
+  );
+
+program.parseAsync();
