@@ -43,7 +43,7 @@ const AUTH_STRIP_PREFIX = [
   "hook_password_verification_attempt_",
 ];
 
-function stripAuth(src: Record<string, unknown>): Record<string, unknown> {
+export function stripAuth(src: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(src)) {
     if (AUTH_STRIP_EXACT.has(k)) continue;
@@ -55,8 +55,17 @@ function stripAuth(src: Record<string, unknown>): Record<string, unknown> {
   return out;
 }
 
-function dropNulls(src: Record<string, unknown>): Record<string, unknown> {
+export function dropNulls(src: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(src).filter(([, v]) => v !== null));
+}
+
+export function stripStorage(s: Record<string, unknown>): Record<string, unknown> {
+  const { capabilities, migrationVersion, databasePoolMode, features, ...rest } = s;
+  void capabilities;
+  void migrationVersion;
+  void databasePoolMode;
+  void features;
+  return rest;
 }
 
 const SECTIONS: Section[] = [
@@ -109,10 +118,7 @@ const SECTIONS: Section[] = [
     getPath: "/config/storage",
     method: "PATCH",
     putPath: "/config/storage",
-    transform: (s) => {
-      const { capabilities, migrationVersion, databasePoolMode, features, ...rest } = s;
-      return rest;
-    },
+    transform: stripStorage,
   },
 ];
 

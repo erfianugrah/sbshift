@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "bun run src/cli.ts",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
     "check": "biome check --write .",
     "lint": "biome check ."

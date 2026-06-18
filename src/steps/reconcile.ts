@@ -19,8 +19,45 @@ import { log } from "../log.ts";
 
 export type ReconcileMode = "chunked" | "full";
 
-type BucketRow = { b: number; n: bigint; h: string };
-type DrillExample = { pk: string; kind: "missing_on_target" | "extra_on_target" | "hash_diff" };
+export type BucketRow = { b: number; n: bigint; h: string };
+export type DrillExample = {
+  pk: string;
+  kind: "missing_on_target" | "extra_on_target" | "hash_diff";
+};
+
+/** Pure: which bucket indices differ in count or content hash. */
+export function diffBuckets(
+  sMap: Map<number, BucketRow>,
+  tMap: Map<number, BucketRow>,
+  buckets: number,
+): number[] {
+  const mismatched: number[] = [];
+  for (let b = 0; b < buckets; b++) {
+    const s = sMap.get(b);
+    const t = tMap.get(b);
+    if ((s?.h ?? "0") !== (t?.h ?? "0") || (s?.n ?? 0n) !== (t?.n ?? 0n)) mismatched.push(b);
+  }
+  return mismatched;
+}
+
+/** Pure: classify per-row divergence within a drilled bucket (pk -> rowhash). */
+export function classifyRows(
+  sRows: Map<string, string>,
+  tRows: Map<string, string>,
+  maxExamples: number,
+): DrillExample[] {
+  const out: DrillExample[] = [];
+  for (const [pk, h] of sRows) {
+    if (out.length >= maxExamples) return out;
+    if (!tRows.has(pk)) out.push({ pk, kind: "missing_on_target" });
+    else if (tRows.get(pk) !== h) out.push({ pk, kind: "hash_diff" });
+  }
+  for (const pk of tRows.keys()) {
+    if (out.length >= maxExamples) return out;
+    if (!sRows.has(pk)) out.push({ pk, kind: "extra_on_target" });
+  }
+  return out;
+}
 type TableReport = {
   table: string;
   mode: ReconcileMode;
@@ -157,12 +194,7 @@ async function reconcileChunked(
     tgtAgg.map((r) => [Number(r.b), { b: Number(r.b), n: BigInt(r.n), h: String(r.h) }]),
   );
 
-  const mismatched: number[] = [];
-  for (let b = 0; b < buckets; b++) {
-    const s = sMap.get(b);
-    const t = tMap.get(b);
-    if ((s?.h ?? "0") !== (t?.h ?? "0") || (s?.n ?? 0n) !== (t?.n ?? 0n)) mismatched.push(b);
-  }
+  const mismatched = diffBuckets(sMap, tMap, buckets);
 
   const sourceRows = [...sMap.values()].reduce((a, r) => a + Number(r.n), 0);
   const targetRows = [...tMap.values()].reduce((a, r) => a + Number(r.n), 0);
@@ -176,15 +208,7 @@ async function reconcileChunked(
     const [sr, tr] = await Promise.all([source.unsafe(drillQ), target.unsafe(drillQ)]);
     const sRows = new Map(sr.map((r) => [String(r.pk), String(r.h)]));
     const tRows = new Map(tr.map((r) => [String(r.pk), String(r.h)]));
-    for (const [pk, h] of sRows) {
-      if (examples.length >= maxExamples) break;
-      if (!tRows.has(pk)) examples.push({ pk, kind: "missing_on_target" });
-      else if (tRows.get(pk) !== h) examples.push({ pk, kind: "hash_diff" });
-    }
-    for (const pk of tRows.keys()) {
-      if (examples.length >= maxExamples) break;
-      if (!sRows.has(pk)) examples.push({ pk, kind: "extra_on_target" });
-    }
+    examples.push(...classifyRows(sRows, tRows, maxExamples - examples.length));
   }
 
   return {
