@@ -8,3 +8,4 @@ ledger/
 !.env.example
 dump/
 schema_dump/
+migrate.config.yaml

@@ -10,6 +10,7 @@ import { writer } from "./rehearsal/writer.ts";
 import { transferFunctions, transferStorage } from "./steps/cli-wrappers.ts";
 import { configSync } from "./steps/config-sync.ts";
 import { cutover } from "./steps/cutover.ts";
+import { doctor } from "./steps/doctor.ts";
 import { preflight } from "./steps/preflight.ts";
 import { reconcile } from "./steps/reconcile.ts";
 import { replicate } from "./steps/replicate.ts";
@@ -38,6 +39,23 @@ async function withDb(
     await close();
   }
 }
+
+program
+  .command("doctor")
+  .description("automated readiness checklist (config, connectivity, schema, reconcile, target)")
+  .option("--source-only", "skip target probing (target not created yet)", false)
+  .action((o) => {
+    const cfg = loadConfig(program.opts().config);
+    const secrets = loadSecrets();
+    doctor(cfg, secrets, { sourceOnly: Boolean(o.sourceOnly) })
+      .then((r) => {
+        if (r.fail > 0) process.exitCode = 1;
+      })
+      .catch((e) => {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      });
+  });
 
 program
   .command("preflight")

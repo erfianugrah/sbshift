@@ -47,7 +47,13 @@ Secrets live only in `.env` (connection strings, access token). The YAML is non-
 ## Runbook
 
 ```bash
-# 0. read-only sanity — versions, wal_level, subscribe grant, replica identity
+# 0a. readiness checklist — connection shape (pooler vs direct), reachability,
+#     wal_level, replica identity, reconcile hashColumns ↔ live schema, stale
+#     slots, row counts, and (when it exists) the target's grant + schema.
+#     Tolerant of a not-yet-created target; add --source-only to skip it.
+bun start doctor --source-only
+
+# 0b. read-only sanity — versions, wal_level, subscribe grant, replica identity
 bun start preflight
 
 # 1. load schema on the TARGET first (logical replication does NOT carry DDL).
