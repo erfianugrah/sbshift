@@ -132,6 +132,33 @@ Reconciliation is authoritative **after cutover** (writes stopped, lag drained):
 checksum matches exactly, nothing was lost — inflight or otherwise. The writer ledger is a
 rehearsal-only extra proof that specifically isolates inflight loss during the initial copy.
 
+## Tests
+
+Two tiers:
+
+```bash
+bun test                 # unit tier — pure logic, no DB, always runs
+```
+
+Unit tier (always on, runs in CI): zod config parsing + identifier/SQL-injection guards,
+config-sync secret stripping, bucket-diff classification, conn-string builder.
+
+```bash
+# integration tier — opt-in, exercises the live replication + reconcile SQL.
+# Needs two THROWAWAY Postgres 15+ DBs; source must have wal_level=logical.
+docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:16 -c wal_level=logical
+docker run -d -p 5433:5432 -e POSTGRES_PASSWORD=pw postgres:16
+
+TEST_SOURCE_DB_URL=postgresql://postgres:pw@localhost:5432/postgres \
+TEST_TARGET_DB_URL=postgresql://postgres:pw@localhost:5433/postgres \
+  bun test test/integration.test.ts
+```
+
+The integration tier stands up real logical replication and asserts each fault is caught:
+happy-path reconcile clean, `lose-row` → reconcile fails, `corrupt-row` → reconcile fails,
+generated column excluded (clean data still reconciles), and `drop-replica-identity` →
+`preflight` rejects. Without the `TEST_*` vars it skips, so CI stays green on unit tests alone.
+
 ## Possible future backend: pgcopydb
 
 `pgcopydb clone --follow` does parallel initial copy + snapshot-consistent catch-up and is

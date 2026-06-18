@@ -63,10 +63,13 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
       hardFail = true;
       continue;
     }
-    // relreplident: d=default(PK), f=full, i=index, n=nothing
-    const ok = r.has_pk || r.relreplident === "f" || r.relreplident === "i";
+    // relreplident: d=default(uses PK), f=full, i=index, n=nothing.
+    // A PK existing is NOT enough — if relreplident='n' there is no replica
+    // identity even with a PK present, and UPDATE/DELETE replication fails.
+    const ok =
+      (r.relreplident === "d" && r.has_pk) || r.relreplident === "f" || r.relreplident === "i";
     if (ok) {
-      log.ok(`${qt} has replica identity (${r.has_pk ? "PK" : r.relreplident})`);
+      log.ok(`${qt} has replica identity (${r.relreplident === "d" ? "PK" : r.relreplident})`);
     } else {
       log.err(
         `${qt} has no replica identity — UPDATE/DELETE will fail. Set REPLICA IDENTITY FULL.`,
