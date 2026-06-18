@@ -144,20 +144,30 @@ Unit tier (always on, runs in CI): zod config parsing + identifier/SQL-injection
 config-sync secret stripping, bucket-diff classification, conn-string builder.
 
 ```bash
-# integration tier — opt-in, exercises the live replication + reconcile SQL.
-# Needs two THROWAWAY Postgres 15+ DBs; source must have wal_level=logical.
-docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=pw postgres:16 -c wal_level=logical
-docker run -d -p 5433:5432 -e POSTGRES_PASSWORD=pw postgres:16
-
-TEST_SOURCE_DB_URL=postgresql://postgres:pw@localhost:5432/postgres \
-TEST_TARGET_DB_URL=postgresql://postgres:pw@localhost:5433/postgres \
-  bun test test/integration.test.ts
+# integration tier — opt-in, exercises the live replication + reconcile SQL
+# against a throwaway Postgres pair. One command, no manual container wrangling:
+bun run test:integration
 ```
 
-The integration tier stands up real logical replication and asserts each fault is caught:
-happy-path reconcile clean, `lose-row` → reconcile fails, `corrupt-row` → reconcile fails,
-generated column excluded (clean data still reconciles), and `drop-replica-identity` →
-`preflight` rejects. Without the `TEST_*` vars it skips, so CI stays green on unit tests alone.
+This stands up two ephemeral `postgres:16` containers (source with `wal_level=logical`)
+plus a bun runner, **all on one compose network**, runs `test/integration.test.ts` inside
+it, and tears everything down. See `docker-compose.test.yml`.
+
+> **Why a shared network and not two bare `docker run`s with `localhost`:** `replicate.ts`
+> uses one connection string both for its own libpq connection and as the subscription's
+> `CONNECTION`, which the *target's* walreceiver dials. With `localhost:5432` the target
+> would resolve `localhost` to itself, not the source, so replication never connects. Inside
+> a compose network the subscription uses the service-DNS name `source:5432`, which resolves
+> identically from the runner and the target.
+
+To point the tier at your own pair instead, set `TEST_SOURCE_DB_URL` + `TEST_TARGET_DB_URL`
+(both must be reachable under the *same* name from wherever the target runs) and
+`bun test test/integration.test.ts`. Without those vars the tier skips, so CI stays green on
+unit tests alone.
+
+The tier stands up real logical replication and asserts each fault is caught: happy-path
+reconcile clean, `lose-row` → reconcile fails, `corrupt-row` → reconcile fails, generated
+column excluded (clean data still reconciles), and `drop-replica-identity` → `preflight` rejects.
 
 ## Possible future backend: pgcopydb
 

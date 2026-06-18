@@ -1,0 +1,65 @@
+# Throwaway Postgres pair + bun runner for the live integration tier.
+#
+# One command:   bun run test:integration
+# (which is just: docker compose -f docker-compose.test.yml run ... — see scripts/test-integration.sh)
+#
+# WHY A RUNNER SERVICE INSTEAD OF TWO BARE `docker run`s:
+#   replicate.ts uses ONE connection string (TEST_SOURCE_DB_URL) for both the
+#   host's own libpq connection AND as the subscription's CONNECTION, which the
+#   TARGET's walreceiver dials. If that string were `localhost:5432`, the target
+#   container would resolve `localhost` to *itself*, not the source — replication
+#   would never connect. Running everything inside one compose network lets the
+#   subscription use the service-DNS name `source:5432`, which resolves
+#   identically from the runner and from the target. No host.docker.internal,
+#   no port-publishing fragility, works the same on Linux / macOS / WSL.
+
+name: sbmigrate-itest
+
+services:
+  source:
+    image: postgres:16
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    environment:
+      POSTGRES_PASSWORD: pw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  target:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: pw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  runner:
+    image: oven/bun:1
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      # Service-DNS names — resolve identically from the runner and from the
+      # target's walreceiver (see header note).
+      TEST_SOURCE_DB_URL: postgresql://postgres:pw@source:5432/postgres
+      TEST_TARGET_DB_URL: postgresql://postgres:pw@target:5432/postgres
+    depends_on:
+      source:
+        condition: service_healthy
+      target:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - bun install --frozen-lockfile && bun test test/integration.test.ts
