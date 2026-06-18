@@ -51,8 +51,10 @@ services:
       - ./:/app
     environment:
       # Service-DNS names — resolve identically from the runner and from the
-      # target's walreceiver (see header note).
-      TEST_SOURCE_DB_URL: postgresql://postgres:pw@source:5432/postgres
+      # target's walreceiver (see header note). sslmode=disable on the source
+      # because the subscription defaults to sslmode=require (for Supabase) and
+      # a plain Postgres container speaks no TLS.
+      TEST_SOURCE_DB_URL: postgresql://postgres:pw@source:5432/postgres?sslmode=disable
       TEST_TARGET_DB_URL: postgresql://postgres:pw@target:5432/postgres
     depends_on:
       source:

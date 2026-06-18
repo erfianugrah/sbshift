@@ -24,16 +24,21 @@ export function connect(secrets: Secrets): { source: Db; target: Db; close: () =
 /**
  * The libpq-style CONNECTION string the TARGET subscription uses to reach the
  * SOURCE. Derived from SOURCE_DB_URL so we never hand-maintain two formats.
+ *
+ * sslmode defaults to `require` (Supabase mandates TLS), but is overridable via
+ * an `?sslmode=` query param on SOURCE_DB_URL so the integration tier can point
+ * at a plain (non-TLS) Postgres with `?sslmode=disable`.
  */
 export function sourceConnString(secrets: Secrets): string {
   const u = new URL(secrets.SOURCE_DB_URL);
+  const sslmode = u.searchParams.get("sslmode") || "require";
   const parts = [
     `host=${u.hostname}`,
     `port=${u.port || "5432"}`,
     `user=${decodeURIComponent(u.username)}`,
     `password=${decodeURIComponent(u.password)}`,
     `dbname=${u.pathname.replace(/^\//, "") || "postgres"}`,
-    "sslmode=require",
+    `sslmode=${sslmode}`,
   ];
   return parts.join(" ");
 }
