@@ -1,77 +1,202 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import { log } from "../log.ts";
 
-type TableResult = {
+/**
+ * Reconciliation at prod scale.
+ *
+ * A single `sum(hashtextextended(row::text))` over a large table is a fully
+ * synchronized sequential scan on BOTH sides for as long as it takes — and when
+ * it mismatches it tells you nothing about WHICH rows diverged.
+ *
+ * The chunked strategy (default) instead does ONE scan per side that buckets
+ * rows by a hash of their primary key into N buckets, producing (count, hash)
+ * per bucket. Buckets are compared cheaply; only mismatched buckets are
+ * drilled into for row-level diff. This is resumable, bounded-memory, and
+ * pinpoints the exact divergent / missing / extra rows.
+ */
+
+export type ReconcileMode = "chunked" | "full";
+
+type BucketRow = { b: number; n: bigint; h: string };
+type DrillExample = { pk: string; kind: "missing_on_target" | "extra_on_target" | "hash_diff" };
+type TableReport = {
   table: string;
-  sourceCount: number;
-  targetCount: number;
-  sourceHash: string;
-  targetHash: string;
+  mode: ReconcileMode;
+  buckets: number;
+  sourceRows: number;
+  targetRows: number;
+  mismatchedBuckets: number[];
+  examples: DrillExample[];
   match: boolean;
 };
 
-/**
- * Prove source and target are identical AFTER writes are stopped and lag drains.
- *  - row count per table
- *  - order-independent content hash over an EXPLICIT column list that EXCLUDES
- *    generated columns (the subscriber recomputes those; hashing them risks
- *    false mismatches from text-search-config differences).
- *  - optional: every id in the rehearsal writer's ledger exists on the target.
- *
- * Returns true iff everything matches.
- */
-export async function reconcile(source: Db, target: Db, cfg: Config): Promise<boolean> {
-  log.step("reconcile");
-  const results: TableResult[] = [];
+const ONLY = (schema: string, table: string) => `ONLY "${schema}"."${table}"`;
 
+async function pkColumns(db: Db, schema: string, table: string): Promise<string[]> {
+  const rows = await db`
+    SELECT a.attname
+    FROM pg_index i
+    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey)
+    WHERE i.indrelid = ${`"${schema}"."${table}"`}::regclass AND i.indisprimary
+    ORDER BY array_position(i.indkey, a.attnum)`;
+  return rows.map((r) => String(r.attname));
+}
+
+async function nonGeneratedColumns(db: Db, schema: string, table: string): Promise<string[]> {
+  const rows = await db`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_schema = ${schema} AND table_name = ${table} AND is_generated = 'NEVER'
+    ORDER BY ordinal_position`;
+  return rows.map((r) => String(r.column_name));
+}
+
+function rowExpr(cols: string[]): string {
+  return `(${cols.map((c) => `"${c}"`).join(",")})::text`;
+}
+
+export async function reconcile(
+  source: Db,
+  target: Db,
+  cfg: Config,
+  opts: { mode?: ReconcileMode; buckets?: number; maxExamples?: number; outDir?: string } = {},
+): Promise<boolean> {
+  const mode: ReconcileMode = opts.mode ?? "chunked";
+  const buckets = opts.buckets ?? 256;
+  const maxExamples = opts.maxExamples ?? 20;
+  const outDir = opts.outDir ?? "ledger";
+  log.step(`reconcile (${mode}${mode === "chunked" ? `, ${buckets} buckets` : ""})`);
+
+  const reports: TableReport[] = [];
   for (const t of cfg.reconcile.tables) {
     const [schema, table] = t.name.split(".") as [string, string];
-    const cols = t.hashColumns ?? (await autoColumns(source, schema, table));
+    const cols = t.hashColumns ?? (await nonGeneratedColumns(source, schema, table));
     if (cols.length === 0) {
-      log.err(`${t.name}: no non-generated columns resolved`);
+      log.err(`${t.name}: no non-generated columns`);
       return false;
     }
-    const rowExpr = `(${cols.map((c) => `"${c}"`).join(",")})::text`;
-    // hashtextextended over a ROW cast; sum is order-independent.
-    const q = `SELECT count(*)::bigint AS n,
-                      coalesce(sum(hashtextextended(${rowExpr}, 0)), 0)::text AS h
-               FROM ONLY "${schema}"."${table}"`;
-    const [s] = await source.unsafe(q);
-    const [tg] = await target.unsafe(q);
-    const r: TableResult = {
-      table: t.name,
-      sourceCount: Number(s?.n ?? -1),
-      targetCount: Number(tg?.n ?? -2),
-      sourceHash: String(s?.h ?? ""),
-      targetHash: String(tg?.h ?? ""),
-      match: s?.n === tg?.n && s?.h === tg?.h,
-    };
-    results.push(r);
-    const line = `${r.table}: count ${r.sourceCount}=${r.targetCount} hash ${r.sourceHash}=${r.targetHash}`;
-    r.match ? log.ok(line) : log.err(line);
+    const report =
+      mode === "full"
+        ? await reconcileFull(source, target, schema, table, cols)
+        : await reconcileChunked(source, target, schema, table, cols, buckets, maxExamples);
+    reports.push(report);
+
+    const head = `${t.name}: src=${report.sourceRows} tgt=${report.targetRows}`;
+    if (report.match) {
+      log.ok(head);
+    } else {
+      log.err(`${head} | mismatched buckets: ${report.mismatchedBuckets.length}`);
+      for (const ex of report.examples) log.detail(`${ex.kind}: ${ex.pk}`);
+    }
   }
 
+  // optional rehearsal-only inflight-loss proof
   let ledgerOk = true;
   if (cfg.reconcile.ledgerPath && cfg.reconcile.ledgerTable) {
     ledgerOk = await reconcileLedger(target, cfg);
   }
 
-  const allMatch = results.every((r) => r.match) && ledgerOk;
+  mkdirSync(outDir, { recursive: true });
+  const outPath = `${outDir}/reconcile-${Date.now()}.json`;
+  writeFileSync(outPath, JSON.stringify({ reports, ledgerOk }, null, 2));
+  log.detail(`report written to ${outPath}`);
+
+  const allMatch = reports.every((r) => r.match) && ledgerOk;
   allMatch
     ? log.ok("RECONCILE PASSED — source and target are identical")
-    : log.err("RECONCILE FAILED — see mismatches above");
+    : log.err("RECONCILE FAILED — see mismatched buckets / examples above");
   return allMatch;
 }
 
-async function autoColumns(db: Db, schema: string, table: string): Promise<string[]> {
-  const rows = await db`
-    SELECT column_name FROM information_schema.columns
-    WHERE table_schema = ${schema} AND table_name = ${table}
-      AND is_generated = 'NEVER'
-    ORDER BY ordinal_position`;
-  return rows.map((r) => String(r.column_name));
+async function reconcileFull(
+  source: Db,
+  target: Db,
+  schema: string,
+  table: string,
+  cols: string[],
+): Promise<TableReport> {
+  const q = `SELECT count(*)::bigint AS n,
+                    coalesce(sum(hashtextextended(${rowExpr(cols)}, 0)), 0)::text AS h
+             FROM ${ONLY(schema, table)}`;
+  const [s] = await source.unsafe(q);
+  const [tg] = await target.unsafe(q);
+  return {
+    table: `${schema}.${table}`,
+    mode: "full",
+    buckets: 1,
+    sourceRows: Number(s?.n ?? -1),
+    targetRows: Number(tg?.n ?? -2),
+    mismatchedBuckets: s?.h === tg?.h ? [] : [0],
+    examples: [],
+    match: s?.n === tg?.n && s?.h === tg?.h,
+  };
+}
+
+async function reconcileChunked(
+  source: Db,
+  target: Db,
+  schema: string,
+  table: string,
+  cols: string[],
+  buckets: number,
+  maxExamples: number,
+): Promise<TableReport> {
+  const pk = await pkColumns(source, schema, table);
+  const keyCols = pk.length > 0 ? pk : cols;
+  const bucketExpr = `(abs(hashtextextended(${rowExpr(keyCols)}, 0)) % ${buckets})`;
+  const aggQ = `SELECT ${bucketExpr} AS b, count(*)::bigint AS n,
+                       coalesce(sum(hashtextextended(${rowExpr(cols)}, 0)), 0)::text AS h
+                FROM ${ONLY(schema, table)} GROUP BY 1`;
+
+  const [srcAgg, tgtAgg] = await Promise.all([source.unsafe(aggQ), target.unsafe(aggQ)]);
+  const sMap = new Map<number, BucketRow>(
+    srcAgg.map((r) => [Number(r.b), { b: Number(r.b), n: BigInt(r.n), h: String(r.h) }]),
+  );
+  const tMap = new Map<number, BucketRow>(
+    tgtAgg.map((r) => [Number(r.b), { b: Number(r.b), n: BigInt(r.n), h: String(r.h) }]),
+  );
+
+  const mismatched: number[] = [];
+  for (let b = 0; b < buckets; b++) {
+    const s = sMap.get(b);
+    const t = tMap.get(b);
+    if ((s?.h ?? "0") !== (t?.h ?? "0") || (s?.n ?? 0n) !== (t?.n ?? 0n)) mismatched.push(b);
+  }
+
+  const sourceRows = [...sMap.values()].reduce((a, r) => a + Number(r.n), 0);
+  const targetRows = [...tMap.values()].reduce((a, r) => a + Number(r.n), 0);
+
+  // Drill only the mismatched buckets for row-level examples.
+  const examples: DrillExample[] = [];
+  for (const b of mismatched) {
+    if (examples.length >= maxExamples) break;
+    const drillQ = `SELECT ${rowExpr(keyCols)} AS pk, hashtextextended(${rowExpr(cols)}, 0)::text AS h
+                    FROM ${ONLY(schema, table)} WHERE ${bucketExpr} = ${b}`;
+    const [sr, tr] = await Promise.all([source.unsafe(drillQ), target.unsafe(drillQ)]);
+    const sRows = new Map(sr.map((r) => [String(r.pk), String(r.h)]));
+    const tRows = new Map(tr.map((r) => [String(r.pk), String(r.h)]));
+    for (const [pk, h] of sRows) {
+      if (examples.length >= maxExamples) break;
+      if (!tRows.has(pk)) examples.push({ pk, kind: "missing_on_target" });
+      else if (tRows.get(pk) !== h) examples.push({ pk, kind: "hash_diff" });
+    }
+    for (const pk of tRows.keys()) {
+      if (examples.length >= maxExamples) break;
+      if (!sRows.has(pk)) examples.push({ pk, kind: "extra_on_target" });
+    }
+  }
+
+  return {
+    table: `${schema}.${table}`,
+    mode: "chunked",
+    buckets,
+    sourceRows,
+    targetRows,
+    mismatchedBuckets: mismatched,
+    examples,
+    match: mismatched.length === 0,
+  };
 }
 
 async function reconcileLedger(target: Db, cfg: Config): Promise<boolean> {
@@ -83,24 +208,27 @@ async function reconcileLedger(target: Db, cfg: Config): Promise<boolean> {
     .map((s) => s.trim())
     .filter(Boolean);
   if (ids.length === 0) {
-    log.warn("ledger is empty — skipping inflight-loss check");
+    log.warn("ledger empty — skipping inflight-loss check");
     return true;
   }
-  // Build a VALUES list of ids and left-join against the target table.
-  const missing = await target.unsafe(
-    `WITH ledger(id) AS (SELECT unnest($1::text[]))
-     SELECT count(*)::bigint AS n
-     FROM ledger l LEFT JOIN "${schema}"."${table}" t ON t."${idCol}"::text = l.id
-     WHERE t."${idCol}" IS NULL`,
-    [ids],
-  );
-  const n = Number(missing[0]?.n ?? -1);
-  if (n === 0) {
+  // Batch the membership check so a multi-million-row ledger doesn't build one giant array param.
+  const BATCH = 10_000;
+  let missing = 0;
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const slice = ids.slice(i, i + BATCH);
+    const [r] = await target.unsafe(
+      `WITH ledger(id) AS (SELECT unnest($1::text[]))
+       SELECT count(*)::bigint AS n
+       FROM ledger l LEFT JOIN "${schema}"."${table}" t ON t."${idCol}"::text = l.id
+       WHERE t."${idCol}" IS NULL`,
+      [slice],
+    );
+    missing += Number(r?.n ?? 0);
+  }
+  if (missing === 0) {
     log.ok(`ledger: all ${ids.length} written ids present on target (no inflight loss)`);
     return true;
   }
-  log.err(
-    `ledger: ${n} of ${ids.length} written ids MISSING on target — inflight writes were lost`,
-  );
+  log.err(`ledger: ${missing} of ${ids.length} written ids MISSING on target`);
   return false;
 }

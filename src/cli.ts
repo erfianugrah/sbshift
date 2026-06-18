@@ -4,7 +4,8 @@ import { type Config, loadConfig, loadSecrets } from "./config.ts";
 import { connect, type Db } from "./db.ts";
 import { log } from "./log.ts";
 import { MgmtApi } from "./mgmt.ts";
-import { seed } from "./rehearsal/seed.ts";
+import { runChaos, SCENARIOS, type ScenarioName } from "./rehearsal/chaos.ts";
+import { seed, seedToSize } from "./rehearsal/seed.ts";
 import { writer } from "./rehearsal/writer.ts";
 import { transferFunctions, transferStorage } from "./steps/cli-wrappers.ts";
 import { configSync } from "./steps/config-sync.ts";
@@ -55,10 +56,17 @@ program
 
 program
   .command("reconcile")
-  .description("counts + content-hash + ledger check (run after writes stop & lag drains)")
-  .action(() =>
+  .description("chunked checksum reconciliation (run after writes stop & lag drains)")
+  .option("--mode <mode>", "chunked | full", "chunked")
+  .option("--buckets <n>", "bucket count for chunked mode", "256")
+  .option("--max-examples <n>", "max divergent rows to report", "20")
+  .action((o) =>
     withDb(async ({ source, target }, cfg) => {
-      const ok = await reconcile(source, target, cfg);
+      const ok = await reconcile(source, target, cfg, {
+        mode: o.mode === "full" ? "full" : "chunked",
+        buckets: Number(o.buckets),
+        maxExamples: Number(o.maxExamples),
+      });
       if (!ok) process.exitCode = 1;
     }),
   );
@@ -120,6 +128,39 @@ rehearse
   .option("--rows <n>", "row count", "100000")
   .option("--payload <bytes>", "approx payload bytes per row", "6000")
   .action((o) => withDb(({ source }, _cfg) => seed(source, Number(o.rows), Number(o.payload))));
+
+rehearse
+  .command("seed-size")
+  .description("seed to a target ON-DISK SIZE to emulate prod scale (e.g. --gib 200)")
+  .option("--gib <n>", "target table size in GiB", "10")
+  .option("--payload <bytes>", "approx payload bytes per row", "6000")
+  .option("--batch <rows>", "rows per insert batch", "50000")
+  .option("--concurrency <n>", "parallel insert batches", "4")
+  .action((o) =>
+    withDb(({ source }, _cfg) =>
+      seedToSize(source, {
+        targetBytes: Number(o.gib) * 1_073_741_824,
+        payloadBytes: Number(o.payload),
+        batchRows: Number(o.batch),
+        concurrency: Number(o.concurrency),
+      }),
+    ),
+  );
+
+rehearse
+  .command("chaos <scenario>")
+  .description(`inject a failure mode: ${Object.keys(SCENARIOS).join(" | ")}`)
+  .option("--arg <value>", "scenario argument (table / subscription name)")
+  .action((scenario, o) => {
+    if (!(scenario in SCENARIOS)) {
+      log.err(`unknown scenario '${scenario}'. options: ${Object.keys(SCENARIOS).join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    return withDb(({ source, target }, _cfg) =>
+      runChaos({ source, target, arg: o.arg }, scenario as ScenarioName),
+    );
+  });
 
 rehearse
   .command("writer")

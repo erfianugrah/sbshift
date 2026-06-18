@@ -78,17 +78,59 @@ bun start teardown
 
 ## Rehearsal (test the whole thing on a throwaway project pair first)
 
-```bash
-# seed the source, then drive continuous write load with an append-only id ledger
-bun start rehearse seed --rows 1000000 --payload 6000
-bun start rehearse writer --ledger ledger/written_ids.log   # leave running THROUGH the migration
+Theory passing at 1M rows proves nothing — the failures that matter (slow initial copy holding
+the slot, WAL bloat, lag that never drains, full-scan reconciliation timing out) only show up
+at scale. So emulate the real **on-disk size**, not a row count:
 
-# after cutover + lag drain, reconcile: counts + content-hash + ledger left-join
-bun start reconcile
+```bash
+# seed to a TARGET SIZE (batched, concurrent, server-side generation)
+bun start rehearse seed-size --gib 200 --payload 6000 --batch 50000 --concurrency 4
+
+# drive continuous write load with an append-only id ledger; leave running THROUGH the migration
+bun start rehearse writer --ledger ledger/written_ids.log
 ```
 
-`reconcile` passes only if row counts match, content hashes match, and every id the writer
-logged exists on the target — i.e. zero inflight loss including writes during the initial copy.
+### Chunked reconciliation (prod-grade)
+
+A single `sum(hash)` over a large table is a synchronized full scan on both sides and only
+says "differ / match". The default `chunked` mode does one scan per side, buckets rows by a
+hash of their PK, compares N bucket checksums, and **drills only the mismatched buckets** to
+name the exact divergent rows:
+
+```bash
+bun start reconcile                      # chunked, 256 buckets (default)
+bun start reconcile --buckets 1024       # finer drill granularity for very large tables
+bun start reconcile --mode full          # legacy single-aggregate (small tables only)
+```
+
+Output (and the per-bucket report at `ledger/reconcile-<ts>.json`) lists, per divergent row,
+whether it is `missing_on_target`, `extra_on_target`, or `hash_diff`.
+
+### Inject the gotchas yourself — confirm the gates catch them
+
+The point of a rehearsal is to break things on purpose and verify the orchestrator notices:
+
+```bash
+bun start rehearse chaos drop-replica-identity   # then: preflight must FAIL
+bun start rehearse chaos lose-row                # then: reconcile reports missing_on_target
+bun start rehearse chaos corrupt-row             # then: reconcile reports hash_diff
+bun start rehearse chaos stall-subscriber        # then: watch's WAL watchdog aborts
+bun start rehearse chaos desync-sequence         # demonstrates the serial-PK collision (uuid is immune)
+bun start rehearse chaos tsearch-drift           # reconcile STILL passes (generated col excluded)
+```
+
+| Scenario | Failure mode emulated | Gate that must catch it |
+|---|---|---|
+| `drop-replica-identity` | UPDATE/DELETE can't replicate | `preflight` ✗ |
+| `lose-row` | dropped row on target | `reconcile` → missing_on_target |
+| `corrupt-row` | silent content drift | `reconcile` → hash_diff |
+| `stall-subscriber` | slot bloats source WAL | `watch` watchdog abort |
+| `desync-sequence` | post-cutover PK collision | manual setval reminder (N/A uuid) |
+| `tsearch-drift` | generated-col config skew | `reconcile` PASSES (guard works) |
+
+Reconciliation is authoritative **after cutover** (writes stopped, lag drained): if the chunked
+checksum matches exactly, nothing was lost — inflight or otherwise. The writer ledger is a
+rehearsal-only extra proof that specifically isolates inflight loss during the initial copy.
 
 ## Possible future backend: pgcopydb
 
