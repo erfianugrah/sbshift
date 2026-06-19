@@ -25,8 +25,23 @@ export async function teardown(source: Db, target: Db, cfg: Config): Promise<voi
     log.detail(`no subscription ${subscription}`);
   }
 
-  const [s] = await source`SELECT 1 FROM pg_replication_slots WHERE slot_name = ${slot}`;
+  const [s] = await source<{ active: boolean; active_pid: number | null }[]>`
+    SELECT active, active_pid FROM pg_replication_slots WHERE slot_name = ${slot}`;
   if (s) {
+    // The walsender backing a just-dropped subscription disconnects
+    // asynchronously, so the slot can briefly remain "active for PID N" and
+    // pg_drop_replication_slot() then errors. Terminate the lingering backend
+    // (the subscription is already gone, so it is orphaned) and poll until the
+    // slot releases before dropping it. Makes teardown deterministic.
+    if (s.active && s.active_pid != null) {
+      await source`SELECT pg_terminate_backend(${s.active_pid})`.catch(() => {});
+    }
+    for (let i = 0; i < 50; i++) {
+      const [row] = await source<{ active: boolean }[]>`
+        SELECT active FROM pg_replication_slots WHERE slot_name = ${slot}`;
+      if (!row?.active) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
     await source`SELECT pg_drop_replication_slot(${slot})`;
     log.ok(`dropped slot ${slot}`);
   } else {
