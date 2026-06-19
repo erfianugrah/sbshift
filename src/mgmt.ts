@@ -4,6 +4,49 @@ const API_BASE = "https://api.supabase.com/v1";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** One advisor lint as returned by GET /advisors/{security,performance}. */
+export type Lint = {
+  name: string;
+  title: string;
+  level: "ERROR" | "WARN" | "INFO";
+  categories?: Array<"PERFORMANCE" | "SECURITY">;
+  description?: string;
+  detail?: string;
+  remediation?: string;
+  metadata?: { schema?: string; name?: string; entity?: string; type?: string };
+  cache_key?: string;
+};
+
+export type AdvisorKind = "security" | "performance";
+
+/** A Supabase org plan, lowest → highest. Used to detect a claim downgrade. */
+export const PLAN_RANK: Record<string, number> = {
+  free: 0,
+  pro: 1,
+  team: 2,
+  enterprise: 3,
+  platform: 4,
+};
+
+/** Preview block of GET /v1/organizations/:slug/project-claim/:token. */
+export interface ClaimPreview {
+  valid: boolean;
+  warnings: { key: string; message: string }[];
+  errors: { key: string; message: string }[];
+  info: { key: string; message: string }[];
+  members_exceeding_free_project_limit: { name: string; limit: number }[];
+  source_subscription_plan: string;
+  target_subscription_plan: string;
+}
+
+export interface ClaimInfo {
+  project: { ref: string; name: string };
+  preview: ClaimPreview;
+  expires_at: string;
+  created_at: string;
+  created_by: string;
+}
+
 export class MgmtApi {
   constructor(private token: string) {}
 
@@ -102,6 +145,34 @@ export class MgmtApi {
     return { host: body[0].db_host, user: body[0].db_user };
   }
 
+  /**
+   * GET /v1/organizations/:slug/project-claim/:token — preview of moving a
+   * project INTO this org. This is the ONLY org-level migration primitive the
+   * Management API exposes: org settings, members + roles, and entitlements are
+   * all read-only (no write endpoint), so they are NOT migratable — they're
+   * dashboard-only. Use claim when the goal is "same project, different org"
+   * rather than the new-project + logical-replication path.
+   */
+  async getClaimPreview(
+    slug: string,
+    token: string,
+  ): Promise<{ status: number; body: ClaimInfo | null }> {
+    const res = await fetch(`${API_BASE}/organizations/${slug}/project-claim/${token}`, {
+      headers: this.headers(),
+    });
+    const body = res.ok ? ((await res.json()) as ClaimInfo) : null;
+    return { status: res.status, body };
+  }
+
+  /** POST /v1/organizations/:slug/project-claim/:token — performs the claim (204). */
+  async claimProject(slug: string, token: string): Promise<{ status: number; text: string }> {
+    const res = await fetch(`${API_BASE}/organizations/${slug}/project-claim/${token}`, {
+      method: "POST",
+      headers: this.headers(),
+    });
+    return { status: res.status, text: await res.text() };
+  }
+
   /** DELETE /v1/projects/:ref — best-effort teardown; ignores 404. */
   async deleteProject(ref: string): Promise<void> {
     const res = await fetch(`${API_BASE}/projects/${ref}`, {
@@ -111,6 +182,33 @@ export class MgmtApi {
     if (!res.ok && res.status !== 404) {
       log.warn(`deleteProject ${ref}: HTTP ${res.status} (ignored)`);
     }
+  }
+
+  /**
+   * GET /v1/projects/:ref/advisors/{security,performance} — the hosted output
+   * of Supabase's lint engine. Used by the `verify` post-migration health gate.
+   *
+   * DEPRECATION NOTE: these endpoints are flagged DEPRECATED / experimental in
+   * the Management API reference. They are still the only HOSTED source of the
+   * lint engine. If they are removed, swap the fetch here for the open-source
+   * "splinter" lint SQL run directly against the target DB — that path works for
+   * generic PG too and needs no access token. Callers only see `{ ok, lints }`
+   * so `verify` does not care which path produced the lints. The `ok=false`
+   * return on non-200 is load-bearing: it lets `verify` fail CLOSED rather than
+   * report a false green if the endpoint disappears.
+   */
+  async getAdvisors(
+    ref: string,
+    kind: AdvisorKind,
+  ): Promise<{ ok: boolean; status: number; lints: Lint[] }> {
+    // security advisor takes an optional lint_type; sql is the documented value.
+    const path = kind === "security" ? "/advisors/security?lint_type=sql" : "/advisors/performance";
+    const { status, body } = await this.get<{ lints: Lint[] }>(ref, path);
+    if (status !== 200 || !body) {
+      log.warn(`GET advisors/${kind} failed (HTTP ${status})`);
+      return { ok: false, status, lints: [] };
+    }
+    return { ok: true, status, lints: body.lints ?? [] };
   }
 
   /** Sanity check: token valid and both refs visible to this account. */

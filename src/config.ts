@@ -56,7 +56,7 @@ export const ConfigSchema = z.object({
     syncTimeoutMin: z.number().int().positive().default(240),
   }),
 
-  /** Which config sections to copy via the Management API. Secrets are always stripped. */
+  /** Which config sections to copy via the Management API. */
   configSync: z
     .object({
       auth: z.boolean().default(true),
@@ -65,6 +65,23 @@ export const ConfigSchema = z.object({
       storage: z.boolean().default(true),
       dbPooler: z.boolean().default(true),
       dbPostgres: z.boolean().default(false),
+      /** Copy SSL enforcement (GET → PUT /ssl-enforcement). */
+      sslEnforcement: z.boolean().default(false),
+      /** Copy DB network restrictions / allowed CIDRs (GET → POST /network-restrictions/apply). */
+      networkRestrictions: z.boolean().default(false),
+      /**
+       * Copy auth INTEGRATION secrets (SMTP/OAuth/SMS/hook creds) instead of
+       * stripping them. Off by default. NOTE: the JWT signing secret + API keys
+       * are NEVER copied regardless (new project = new keys) — those live on
+       * separate endpoints this tool does not call.
+       */
+      secrets: z.boolean().default(false),
+      /** Copy project (Edge Function) secrets via the bulk /secrets endpoint. Plaintext — opt-in. */
+      projectSecrets: z.boolean().default(false),
+      /** Recreate third-party-auth integrations (Firebase/Auth0/Cognito/Clerk JWT) on the target. */
+      thirdPartyAuth: z.boolean().default(false),
+      /** Recreate SSO/SAML providers (entity, metadata, domains, attribute mapping) on the target. */
+      ssoProviders: z.boolean().default(false),
     })
     .default({
       auth: true,
@@ -73,7 +90,34 @@ export const ConfigSchema = z.object({
       storage: true,
       dbPooler: true,
       dbPostgres: false,
+      sslEnforcement: false,
+      networkRestrictions: false,
+      secrets: false,
+      projectSecrets: false,
+      thirdPartyAuth: false,
+      ssoProviders: false,
     }),
+
+  /**
+   * Billable infra to copy SOURCE → TARGET via the `provision` command. All
+   * default OFF — every one of these CHANGES THE TARGET'S BILL. `provision`
+   * previews by default and only mutates with --confirm. It ADDS/UPGRADES the
+   * target to match the source; it never strips addons the target already has.
+   */
+  provision: z
+    .object({
+      /** Match compute instance size (ci_micro…ci_xlarge). */
+      compute: z.boolean().default(false),
+      /** Match Point-in-Time-Recovery addon (pitr_7/14/28). */
+      pitr: z.boolean().default(false),
+      /** Match dedicated IPv4 addon. */
+      ipv4: z.boolean().default(false),
+      /** Match disk attributes (size_gb / iops / throughput / type). */
+      disk: z.boolean().default(false),
+      /** Match daily backup schedule time (Enterprise plan only). */
+      backupSchedule: z.boolean().default(false),
+    })
+    .default({ compute: false, pitr: false, ipv4: false, disk: false, backupSchedule: false }),
 
   storage: z.object({ buckets: z.array(z.string()).default([]) }).default({ buckets: [] }),
   functions: z.object({ enabled: z.boolean().default(false) }).default({ enabled: false }),
