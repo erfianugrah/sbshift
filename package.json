@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit",
     "check": "biome check --write .",
     "lint": "biome check .",
-    "test:live": "bun run scripts/live-supabase-test.ts"
+    "test:live": "bun run test/live.harness.ts",
+    "test:scale": "docker compose -f docker-compose.test.yml run --rm -e ROWS=1000000 runner sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'"
   },
   "dependencies": {
     "commander": "^14.0.0",

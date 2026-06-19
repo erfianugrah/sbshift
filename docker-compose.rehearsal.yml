@@ -6,6 +6,8 @@
 #   docker compose -f docker-compose.rehearsal.yml up -d
 #   docker compose -f docker-compose.rehearsal.yml exec -T runner \
 #       bun start -c migrate.config.example.yaml doctor
+#   docker compose -f docker-compose.rehearsal.yml exec -T runner \
+#       bun run test/scale.harness.ts
 #   ... seed-size / replicate / watch / reconcile via the runner ...
 #   docker compose -f docker-compose.rehearsal.yml down -v
 #
