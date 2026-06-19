@@ -5,6 +5,7 @@ import { connect, type Db } from "./db.ts";
 import { log } from "./log.ts";
 import { MgmtApi } from "./mgmt.ts";
 import { runChaos, SCENARIOS, type ScenarioName } from "./rehearsal/chaos.ts";
+import { rehearseRun } from "./rehearsal/orchestrate.ts";
 import { seed, seedToSize } from "./rehearsal/seed.ts";
 import { writer } from "./rehearsal/writer.ts";
 import { transferFunctions, transferStorage } from "./steps/cli-wrappers.ts";
@@ -14,6 +15,8 @@ import { doctor } from "./steps/doctor.ts";
 import { preflight } from "./steps/preflight.ts";
 import { reconcile } from "./steps/reconcile.ts";
 import { replicate } from "./steps/replicate.ts";
+import { PHASES, type Phase, run } from "./steps/run.ts";
+import { printStatus, status } from "./steps/status.ts";
 import { teardown } from "./steps/teardown.ts";
 import { watch } from "./steps/watch.ts";
 
@@ -42,6 +45,49 @@ async function withDb(
     await close();
   }
 }
+
+program
+  .command("run")
+  .description(
+    "autonomously run the pipeline (preflight→replicate→watch→reconcile) — for CI/Lambda",
+  )
+  .option("--through <phase>", `stop after: ${PHASES.join(" | ")}`, "reconcile")
+  .option("--json", "emit NDJSON events on stdout (human logs → stderr)", false)
+  .option("--confirm-writes-stopped", "required to allow --through cutover", false)
+  .option("--max-lag-wait <sec>", "cutover lag-drain wait", "300")
+  .action((o) => {
+    const through = o.through as Phase;
+    if (!PHASES.includes(through)) {
+      log.err(`unknown --through '${through}' (valid: ${PHASES.join(", ")})`);
+      process.exitCode = 1;
+      return;
+    }
+    if (o.json) log.toStderr();
+    return withDb(async ({ source, target }, cfg) => {
+      const r = await run(source, target, cfg, loadSecrets(), {
+        through,
+        json: Boolean(o.json),
+        confirmWritesStopped: Boolean(o.confirmWritesStopped),
+        maxLagWaitSec: Number(o.maxLagWait),
+      });
+      if (!r.ok) process.exitCode = 1;
+    });
+  });
+
+program
+  .command("status")
+  .description("poll-once replication snapshot (sync state, WAL, lag) — for a scheduled watcher")
+  .option("--json", "emit a single JSON object on stdout", false)
+  .option("--require-synced", "exit non-zero unless all tables are ready", false)
+  .action((o) => {
+    if (o.json) log.toStderr();
+    return withDb(async ({ source, target }, cfg) => {
+      const snap = await status(source, target, cfg);
+      if (o.json) process.stdout.write(`${JSON.stringify(snap)}\n`);
+      else printStatus(snap);
+      if (o.requireSynced && !snap.tables.allReady) process.exitCode = 1;
+    });
+  });
 
 program
   .command("doctor")
@@ -167,6 +213,37 @@ rehearse
       }),
     ),
   );
+
+rehearse
+  .command("run")
+  .description("full scale rehearsal in-tool: seed → run → fault gate → teardown (THROWAWAY pair)")
+  .option("--gib <n>", "target source size in GiB", "10")
+  .option("--payload <bytes>", "approx payload bytes per row", "6000")
+  .option("--batch <rows>", "rows per insert batch", "1000")
+  .option("--concurrency <n>", "parallel insert batches", "4")
+  .option(
+    "--chaos <scenario>",
+    `inject a fault after sync, expect reconcile to catch it: ${Object.keys(SCENARIOS).join(" | ")}`,
+  )
+  .option("--chaos-arg <value>", "argument for the chaos scenario (e.g. public.documents)")
+  .action((o) => {
+    if (o.chaos && !(o.chaos in SCENARIOS)) {
+      log.err(`unknown --chaos '${o.chaos}' (valid: ${Object.keys(SCENARIOS).join(", ")})`);
+      process.exitCode = 1;
+      return;
+    }
+    return withDb(async ({ source, target }, cfg) => {
+      const ok = await rehearseRun(source, target, cfg, loadSecrets(), {
+        targetBytes: Number(o.gib) * 1_073_741_824,
+        payloadBytes: Number(o.payload),
+        batchRows: Number(o.batch),
+        concurrency: Number(o.concurrency),
+        chaos: o.chaos as ScenarioName | undefined,
+        chaosArg: o.chaosArg,
+      });
+      if (!ok) process.exitCode = 1;
+    });
+  });
 
 rehearse
   .command("chaos <scenario>")
