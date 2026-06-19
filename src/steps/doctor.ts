@@ -165,7 +165,7 @@ async function probe(db: Db): Promise<{ ok: boolean; error?: string }> {
 function reachHint(error: string | undefined, c: ReturnType<typeof classifyConn>): string {
   const e = error ?? "unknown error";
   if (/network is unreachable|enetunreach|ehostunreach/i.test(e) && c.isSupabaseDirect)
-    return "host resolves IPv6-only and there's no IPv6 route from here. Run sbmigrate from an IPv6-capable host, or enable the source's IPv4 add-on.";
+    return "host resolves IPv6-only and there's no IPv6 route from here. Run pgshift from an IPv6-capable host, or enable the source's IPv4 add-on.";
   return e;
 }
 

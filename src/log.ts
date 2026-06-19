@@ -54,7 +54,7 @@ export const log = {
     fileSink = createWriteStream(path, { flags: "a" });
     sinkPath = path;
     fileSink.write(
-      `\n${new Date().toISOString()} ----   sbmigrate log opened (pid ${process.pid})\n`,
+      `\n${new Date().toISOString()} ----   pgshift log opened (pid ${process.pid})\n`,
     );
     return path;
   },

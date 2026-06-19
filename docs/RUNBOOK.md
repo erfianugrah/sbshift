@@ -49,7 +49,7 @@ The direct host is **IPv6-only** unless the project has the IPv4 add-on. **This 
 no IPv6 route**, so `replicate` / `watch` / `reconcile` **cannot run from here**. Pick one
 before you go further:
 
-- **Option A (recommended, $0):** run `sbmigrate` from an IPv6-capable host — e.g. a small
+- **Option A (recommended, $0):** run `pgshift` from an IPv6-capable host — e.g. a small
   VM in the target region. Clone the repo, `bun install`, copy `migrate.config.yaml` + `.env`.
 - **Option B (small cost):** enable the [IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address)
   on the source (and target) for the migration window, then run from this box. Remove it after.
@@ -62,7 +62,7 @@ pooler** regardless of which option you choose.
 ## 2. Prep state (already done — verify, don't redo)
 
 ```bash
-cd ~/supabase-region-migrate
+cd ~/pgshift
 bun install
 # migrate.config.yaml and .env are already staged (both gitignored).
 #   - migrate.config.yaml: source.ref = REDACTED, target.ref = PENDING…
@@ -216,7 +216,7 @@ your Grafana/observability stack owns the **app-tier** gates (right). Abort if e
 - `reconcile` reports any mismatch → do **not** complete cutover; investigate.
 - App-tier: sustained 5xx > Y for N min, or DB p95 > X for N min, after repoint → roll back (§12).
 
-Keep one Grafana view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `sbmigrate watch`/`status` output (or its `--log-file`).
+Keep one Grafana view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `pgshift watch`/`status` output (or its `--log-file`).
 
 ```bash
 # 9a. STOP application writes to the SOURCE (put the app in read-only / take it down).

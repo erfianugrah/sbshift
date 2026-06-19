@@ -13,7 +13,7 @@
 #   identically from the runner and from the target. No host.docker.internal,
 #   no port-publishing fragility, works the same on Linux / macOS / WSL.
 
-name: sbmigrate-itest
+name: pgshift-itest
 
 services:
   source:

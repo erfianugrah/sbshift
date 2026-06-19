@@ -1,12 +1,23 @@
-# supabase-region-migrate
+# pgshift
 
-Typed CLI orchestrator for **cross-region Supabase → Supabase migration** with minimal
-downtime, via native Postgres logical replication. Built for the large-class case where a
-plain dump/restore window is unacceptable.
+Typed CLI orchestrator for **near-zero-downtime Postgres-to-Postgres migration** via native
+logical replication. Built for the large-class case where a plain dump/restore window is
+unacceptable.
+
+The core engine — `replicate → watch → reconcile → cutover → teardown` — is **generic
+Postgres** (publication + slot + subscription, catalog-driven monitoring, checksum
+reconciliation, lag-drain + sequence resync). It works for any PG15+ → PG15+ pair:
+Supabase↔Supabase (any region, or same region for a tier change / project split),
+self-hosted↔Supabase, or self-hosted↔self-hosted.
+
+It is also **Supabase-aware**: when both ends are Supabase projects, optional commands wrap
+the official `supabase` CLI and Management API for the non-replicated pieces (schema dump,
+storage, edge functions, project config) instead of reimplementing them. Those commands
+no-op / are skippable for non-Supabase migrations — see “Using pgshift for non-Supabase
+migrations” below.
 
 It owns the one piece nothing else automates — the **data replication state machine +
-reconciliation + WAL watchdog** — and wraps the official `supabase` CLI and Management API
-for the rest (schema, storage, functions, project config) instead of reimplementing them.
+reconciliation + WAL watchdog**.
 
 ## Why this exists
 
@@ -49,7 +60,7 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 
 | Tool | Version | Needed for |
 |---|---|---|
-| [Bun](https://bun.sh) | ≥ 1.3 | runs the CLI directly from TypeScript — **no build step**, `sbmigrate` = `bun run src/cli.ts` |
+| [Bun](https://bun.sh) | ≥ 1.3 | runs the CLI directly from TypeScript — **no build step**, `pgshift` = `bun run src/cli.ts` |
 | `supabase` CLI | ≥ 2.x | `config-sync`, `functions`, `storage`, and the auth/roles/schema dump-restore pre-step |
 | `psql` + `pg_dump` | ≥ 15 (17 matches the source) | restoring roles/schema/auth onto the target; loading migrations |
 | Docker + `docker compose` | v2 | **only** for the rehearsal harness and `test:integration` — not for a real migration |
@@ -75,7 +86,7 @@ client), `yaml` (config), `zod` (config validation). Dev: `@biomejs/biome`, `typ
 ## Getting started
 
 ```bash
-git clone <repo> && cd supabase-region-migrate
+git clone <repo> && cd pgshift
 bun install                                           # commander, postgres, yaml, zod
 cp migrate.config.example.yaml migrate.config.yaml    # set source/target refs + tables
 cp .env.example .env                                  # DIRECT connection strings + PAT
@@ -100,7 +111,7 @@ bun run check             # biome format + lint
 This tool needs a **direct** connection (`db.<ref>.supabase.co:5432`) on both ends —
 the pooler (`*.pooler.supabase.com`) **cannot stream logical replication**. The direct
 host is **IPv6-only** unless the project has the [IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address).
-If the box you run `sbmigrate` from has no IPv6 route, run it from one that does (a VM in
+If the box you run `pgshift` from has no IPv6 route, run it from one that does (a VM in
 the target region is ideal) or enable the IPv4 add-on for the migration window. `doctor`
 classifies each URL and tells you which situation you're in.
 
@@ -133,6 +144,29 @@ psql --single-transaction --variable ON_ERROR_STOP=1 \
 Also enable any **non-default extensions** on the target first (example-app uses `pg_cron`,
 `pgcrypto`, `uuid-ossp`, `pg_stat_statements`, `hypopg`, `index_advisor`, `supabase_vault`) —
 `doctor` diffs source vs target extensions and lists the missing ones.
+
+## Using pgshift for non-Supabase migrations
+
+The replication engine is plain Postgres — the live integration suite runs it against vanilla
+`postgres:16` containers with zero Supabase involvement. To migrate any PG15+ → PG15+ pair
+(self-hosted↔self-hosted, self-hosted↔Supabase, same-region tier change, project split):
+
+- **Required, same as always:** source has `wal_level=logical`; the target role can
+  `CREATE SUBSCRIPTION`; the schema (DDL) is loaded on the target first (logical replication
+  never carries DDL); the connection strings are **direct** (not a transaction pooler).
+- **Use these commands:** `doctor`, `preflight`, `replicate`, `watch`, `reconcile`, `cutover`,
+  `teardown`, `status`, `run`. All are engine-only and Supabase-agnostic.
+- **Skip these Supabase-only commands:** `config-sync` (needs `SUPABASE_ACCESS_TOKEN`; no-ops
+  without it), `functions` (set `functions.enabled: false`), `storage` (leave
+  `storage.buckets: []`). For roles/auth/extension pre-steps, use ordinary `pg_dump`/`pg_dumpall`
+  instead of the `supabase db dump` snippets above.
+- **doctor stays useful:** its Supabase-host heuristics (pooler-vs-direct, IPv6, the `auth.users`
+  trap) degrade to no-ops on a plain host — a non-Supabase host is simply “neither pooler nor
+  direct” and the wal_level / replica-identity / version / `CREATE SUBSCRIPTION` /
+  schema-loaded / extension-diff checks all still run.
+
+The config defaults (`replication.slot`/`publication`/`subscription`) are generic names; set
+them to whatever your environment prefers in `migrate.config.yaml`.
 
 ## Runbook
 
