@@ -105,6 +105,29 @@ export async function reconcile(
   const outDir = opts.outDir ?? "ledger";
   log.step(`reconcile (${mode}${mode === "chunked" ? `, ${buckets} buckets` : ""})`);
 
+  // Pre-flight: reconcile is only meaningful once the target has caught up. If the
+  // replication slot still exists AND retains WAL the subscriber hasn't confirmed,
+  // the source has in-flight rows not yet on the target — reconcile will report
+  // spurious `missing_on_target` diffs. Warn loudly; this is a correctness footgun,
+  // not a hard error (you may be reconciling mid-stream deliberately).
+  try {
+    const [lagRow] = await source`
+      SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS lag_bytes, active
+      FROM pg_replication_slots WHERE slot_name = ${cfg.replication.slot}`;
+    if (lagRow) {
+      const lagKb = Number(lagRow.lag_bytes ?? 0) / 1024;
+      if (lagKb > 0) {
+        log.warn(
+          `replication slot ${cfg.replication.slot} still retains ${lagKb.toFixed(1)} KB of ` +
+            "un-confirmed WAL — the source has rows not yet on the target. Expect FALSE " +
+            "`missing_on_target` diffs. Run reconcile only AFTER cutover drains lag to zero.",
+        );
+      }
+    }
+  } catch {
+    /* slot already torn down (post-teardown reconcile) — nothing to check */
+  }
+
   const reports: TableReport[] = [];
   for (const t of cfg.reconcile.tables) {
     const [schema, table] = t.name.split(".") as [string, string];
