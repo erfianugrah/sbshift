@@ -6,7 +6,12 @@ describe("stripAuth — secrets must never be copied", () => {
     site_url: "https://example.com",
     jwt_exp: 3600,
     external_google_enabled: true,
-    // all of the following MUST be stripped:
+    // M-6: behavioral settings — must be COPIED, not stripped
+    sessions_single_per_user: true,
+    api_max_request_duration: 300,
+    db_max_pool_size: 25,
+    sessions_tags: ["web"],
+    // secrets — must be STRIPPED
     smtp_pass: "supersecret",
     smtp_user: "mailer",
     sms_twilio_auth_token: "tok",
@@ -17,6 +22,14 @@ describe("stripAuth — secrets must never be copied", () => {
     passkey_rp_id: "example.com",
     webauthn_something: "x",
     rate_limit_email_sent: 30,
+    // M-7: newer hook types — only credentials must be stripped, not config
+    hook_send_sms_enabled: true,
+    hook_send_sms_uri: "https://example.com/hook",
+    hook_send_sms_secrets: "v1,whsec_abc",
+    hook_custom_access_token_enabled: false,
+    hook_custom_access_token_uri: "https://example.com/token",
+    hook_custom_access_token_secret: "whsec_xyz",
+    hook_custom_access_token_headers: JSON.stringify({ Authorization: "Bearer token" }),
   };
   const out = stripAuth(input);
 
@@ -24,6 +37,13 @@ describe("stripAuth — secrets must never be copied", () => {
     expect(out.site_url).toBe("https://example.com");
     expect(out.jwt_exp).toBe(3600);
     expect(out.external_google_enabled).toBe(true);
+  });
+
+  test("M-6: copies behavioral settings (not secrets)", () => {
+    expect(out.sessions_single_per_user).toBe(true);
+    expect(out.api_max_request_duration).toBe(300);
+    expect(out.db_max_pool_size).toBe(25);
+    expect(out.sessions_tags).toEqual(["web"]);
   });
 
   test("strips every secret-bearing key", () => {
@@ -49,6 +69,18 @@ describe("stripAuth — secrets must never be copied", () => {
       expect(/^smtp_/.test(k)).toBe(false);
       expect(/passkey|web_?authn/.test(k)).toBe(false);
     }
+  });
+
+  test("M-7: newer hook types — copies enabled/uri, strips secrets/headers", () => {
+    // non-credential hook config must be copied
+    expect(out.hook_send_sms_enabled).toBe(true);
+    expect(out.hook_send_sms_uri).toBe("https://example.com/hook");
+    expect(out.hook_custom_access_token_enabled).toBe(false);
+    expect(out.hook_custom_access_token_uri).toBe("https://example.com/token");
+    // credentials must be stripped
+    expect(out).not.toHaveProperty("hook_send_sms_secrets");
+    expect(out).not.toHaveProperty("hook_custom_access_token_secret");
+    expect(out).not.toHaveProperty("hook_custom_access_token_headers");
   });
 });
 

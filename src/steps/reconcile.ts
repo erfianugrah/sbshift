@@ -70,6 +70,10 @@ type TableReport = {
   match: boolean;
 };
 
+// L-11: both source and target scans are launched concurrently via Promise.all.
+// This halves wall-clock time but doubles peak I/O on both machines simultaneously.
+// For a large table that's acceptable; on IOPS-constrained instances consider
+// serialising by removing the Promise.all and awaiting each scan separately.
 const ONLY = (schema: string, table: string) => `ONLY "${schema}"."${table}"`;
 
 async function pkColumns(db: Db, schema: string, table: string): Promise<string[]> {
@@ -253,7 +257,8 @@ async function reconcileChunked(
   };
 }
 
-async function reconcileLedger(target: Db, cfg: Config): Promise<boolean> {
+/** Exported for testing. Verifies every id written to the ledger file is present on the target. */
+export async function reconcileLedger(target: Db, cfg: Config): Promise<boolean> {
   const path = cfg.reconcile.ledgerPath as string;
   const [schema, table] = (cfg.reconcile.ledgerTable as string).split(".") as [string, string];
   const idCol = cfg.reconcile.ledgerIdColumn;

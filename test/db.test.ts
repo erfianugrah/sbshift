@@ -1,35 +1,35 @@
 import { describe, expect, test } from "bun:test";
-import { isTransient, sourceConnString } from "../src/db.ts";
+import { isTransient, sourceConnUrl } from "../src/db.ts";
 
-describe("sourceConnString", () => {
-  test("builds a libpq connection string from a direct URL", () => {
-    const s = sourceConnString({
+// C-2: sourceConnString (libpq keyword=value) was replaced by sourceConnUrl which
+// returns the raw URL for CREATE SUBSCRIPTION CONNECTION — no quoting needed
+// because Postgres accepts URL format natively and percent-encoding handles special chars.
+describe("sourceConnUrl", () => {
+  test("prefers SOURCE_REPLICATION_URL when set", () => {
+    const url = sourceConnUrl({
+      SOURCE_DB_URL: "postgresql://postgres:pw@pooler.host/db",
+      TARGET_DB_URL: "postgresql://postgres:pw@target/db",
+      SOURCE_REPLICATION_URL: "postgresql://postgres:pw@db.ref.supabase.co/postgres",
+    });
+    expect(url).toBe("postgresql://postgres:pw@db.ref.supabase.co/postgres");
+  });
+
+  test("falls back to SOURCE_DB_URL when SOURCE_REPLICATION_URL is absent", () => {
+    const url = sourceConnUrl({
       SOURCE_DB_URL: "postgresql://postgres:pw123@db.aaaa.supabase.co:5432/postgres",
       TARGET_DB_URL: "postgresql://postgres:pw@db.bbbb.supabase.co:5432/postgres",
     });
-    expect(s).toContain("host=db.aaaa.supabase.co");
-    expect(s).toContain("port=5432");
-    expect(s).toContain("user=postgres");
-    expect(s).toContain("password=pw123");
-    expect(s).toContain("dbname=postgres");
-    expect(s).toContain("sslmode=require");
+    expect(url).toBe("postgresql://postgres:pw123@db.aaaa.supabase.co:5432/postgres");
   });
 
-  test("url-decodes a password with special characters", () => {
-    const s = sourceConnString({
-      SOURCE_DB_URL: "postgresql://postgres:p%40ss%3Aword@db.x.supabase.co:5432/postgres",
-      TARGET_DB_URL: "postgresql://postgres:pw@db.y.supabase.co:5432/postgres",
+  test("a password with special characters stays percent-encoded (no quoting needed)", () => {
+    const url = sourceConnUrl({
+      SOURCE_DB_URL: "postgresql://postgres:p%40ss%3Aword@db.x.supabase.co/postgres",
+      TARGET_DB_URL: "postgresql://u:p@t/db",
     });
-    expect(s).toContain("password=p@ss:word");
-  });
-
-  test("defaults port + dbname when absent", () => {
-    const s = sourceConnString({
-      SOURCE_DB_URL: "postgresql://u:p@host.example/",
-      TARGET_DB_URL: "postgresql://u:p@host.example/",
-    });
-    expect(s).toContain("port=5432");
-    expect(s).toContain("dbname=postgres");
+    // Percent-encoded form is safe for SQL string embedding — no raw ' or spaces
+    expect(url).toContain("p%40ss%3Aword");
+    expect(url).not.toContain("p@ss:word");
   });
 });
 

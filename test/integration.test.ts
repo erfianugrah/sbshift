@@ -133,7 +133,7 @@ d("live replication + reconciliation", () => {
     await createSchema(source);
     await createSchema(target);
     await runChaos({ source, target, arg: TABLE }, "drop-replica-identity");
-    expect(preflight(source, target, cfg)).rejects.toThrow();
+    await expect(preflight(source, target, cfg)).rejects.toThrow(); // L-14: was missing await
   }, 60_000);
 
   test("doctor: clean synced pair reports zero failures", async () => {

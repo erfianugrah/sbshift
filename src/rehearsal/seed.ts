@@ -45,9 +45,17 @@ export async function seedToSize(
   let batches = 0;
   const t0 = Date.now();
   while (size < opts.targetBytes) {
-    // fire `concurrency` batches in parallel, then re-check size
-    await Promise.all(Array.from({ length: opts.concurrency }, () => insertBatch(source)));
-    batches += opts.concurrency;
+    // L-5: when close to the target, switch to single-batch execution to
+    // minimise overshoot. The previous code always fired `concurrency` batches
+    // in parallel — at --payload 6000 --concurrency 4 --batch 50000 that's
+    // ~1.2 GB of overshoot on the last iteration.
+    if (size > opts.targetBytes * 0.8) {
+      await insertBatch(source);
+      batches++;
+    } else {
+      await Promise.all(Array.from({ length: opts.concurrency }, () => insertBatch(source)));
+      batches += opts.concurrency;
+    }
     size = await tableSize();
     const pct = ((size / opts.targetBytes) * 100).toFixed(1);
     const rate = (size / 1_048_576 / ((Date.now() - t0) / 1000)).toFixed(1);

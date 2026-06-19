@@ -1,4 +1,5 @@
-import { appendFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Db } from "../db.ts";
 import { log } from "../log.ts";
 
@@ -14,14 +15,20 @@ export async function writer(
   source: Db,
   opts: { ledgerPath: string; intervalMs: number; durationSec?: number },
 ): Promise<void> {
+  // C-3: create ledger directory before the first append — appendFileSync throws
+  // ENOENT if the parent dir doesn't exist (e.g. on a clean clone).
+  mkdirSync(dirname(opts.ledgerPath), { recursive: true });
   log.step(`writer -> ${opts.ledgerPath} (every ${opts.intervalMs}ms)`);
   const stopAt = opts.durationSec ? Date.now() + opts.durationSec * 1000 : Number.POSITIVE_INFINITY;
   let inserts = 0;
   let mutations = 0;
   let running = true;
-  process.on("SIGINT", () => {
+  // L-8: handle both SIGINT (Ctrl-C) and SIGTERM (docker stop / systemd / k8s)
+  const stop = () => {
     running = false;
-  });
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
 
   while (running && Date.now() < stopAt) {
     const [row] = await source`

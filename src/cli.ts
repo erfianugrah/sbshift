@@ -62,6 +62,9 @@ async function withDb(
   try {
     await fn({ source, target }, cfg);
   } catch (e) {
+    // L-7: surface the stack trace in DEBUG mode so implementation bugs don't
+    // look identical to user-facing errors in logs.
+    if (process.env.DEBUG && e instanceof Error && e.stack) log.detail(e.stack);
     log.err(e instanceof Error ? e.message : String(e));
     process.exitCode = 1;
   } finally {
@@ -150,12 +153,15 @@ program
   .option("--mode <mode>", "chunked | full", "chunked")
   .option("--buckets <n>", "bucket count for chunked mode", "256")
   .option("--max-examples <n>", "max divergent rows to report", "20")
+  // L-17: expose outDir so operators can redirect the JSON report from the CLI
+  .option("--out-dir <path>", "directory for the reconcile JSON report", "ledger")
   .action((o) =>
     withDb(async ({ source, target }, cfg) => {
       const ok = await reconcile(source, target, cfg, {
         mode: o.mode === "full" ? "full" : "chunked",
         buckets: Number(o.buckets),
         maxExamples: Number(o.maxExamples),
+        outDir: o.outDir,
       });
       if (!ok) process.exitCode = 1;
     }),
@@ -187,6 +193,7 @@ program
     api
       .assertAccess([cfg.source.ref, cfg.target.ref])
       .then(() => configSync(api, cfg, { dryRun: Boolean(o.dryRun) }))
+      .then((r) => { if (r.err > 0) process.exitCode = 1; })
       .catch((e) => {
         log.err(e instanceof Error ? e.message : String(e));
         process.exitCode = 1;

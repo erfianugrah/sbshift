@@ -1,7 +1,16 @@
 import type { Config, Secrets } from "../config.ts";
 import type { Db } from "../db.ts";
-import { sourceConnString } from "../db.ts";
+import { sourceConnUrl } from "../db.ts";
 import { log } from "../log.ts";
+
+// H-4: quote every identifier that comes from user config so names with hyphens,
+// uppercase letters, or reserved words don't produce invalid SQL.
+const qi = (s: string) => `"${s.replace(/"/g, '""')}"`;
+// Qualified table name — schema and table quoted separately.
+const qt = (schemaTable: string) => {
+  const [s, t] = schemaTable.split(".");
+  return `${qi(s ?? schemaTable)}.${qi(t ?? "")}`;
+};
 
 /**
  * Stand up logical replication SOURCE -> TARGET using the native, Supabase-documented path:
@@ -25,19 +34,19 @@ export async function replicate(
   if (pub) {
     log.warn(`publication ${publication} exists — leaving as-is`);
   } else {
-    await source.unsafe(`CREATE PUBLICATION ${publication}`);
+    await source.unsafe(`CREATE PUBLICATION ${qi(publication)}`);
     log.ok(`created publication ${publication}`);
   }
-  for (const qt of tables) {
-    const [schema, table] = qt.split(".");
+  for (const table of tables) {
+    const [schema, tbl] = table.split(".");
     const [present] = await source`
       SELECT 1 FROM pg_publication_tables
-      WHERE pubname = ${publication} AND schemaname = ${schema ?? ""} AND tablename = ${table ?? ""}`;
+      WHERE pubname = ${publication} AND schemaname = ${schema ?? ""} AND tablename = ${tbl ?? ""}`;
     if (present) {
-      log.detail(`${qt} already in publication`);
+      log.detail(`${table} already in publication`);
     } else {
-      await source.unsafe(`ALTER PUBLICATION ${publication} ADD TABLE ${qt}`);
-      log.ok(`added ${qt} to publication`);
+      await source.unsafe(`ALTER PUBLICATION ${qi(publication)} ADD TABLE ${qt(table)}`);
+      log.ok(`added ${table} to publication`);
     }
   }
 
@@ -60,7 +69,7 @@ export async function replicate(
     // Safe and idempotent: a no-op when nothing changed.
     log.warn(`subscription ${subscription} already exists on target — refreshing publication`);
     try {
-      await target.unsafe(`ALTER SUBSCRIPTION ${subscription} REFRESH PUBLICATION`);
+      await target.unsafe(`ALTER SUBSCRIPTION ${qi(subscription)} REFRESH PUBLICATION`);
       log.ok(`refreshed subscription ${subscription} (picks up any newly published tables)`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -68,11 +77,15 @@ export async function replicate(
     }
     return;
   }
-  const conn = sourceConnString(secrets).replaceAll("'", "''");
+
+  // C-2: use the URL directly — PostgreSQL's CREATE SUBSCRIPTION CONNECTION accepts URL format,
+  // avoiding the libpq keyword=value quoting problem (unquoted passwords with spaces break
+  // tokenisation before any escaping layer can fix it). Percent-encoding in the URL is clean.
+  const conn = sourceConnUrl(secrets).replaceAll("'", "''");
   await target.unsafe(
-    `CREATE SUBSCRIPTION ${subscription}
+    `CREATE SUBSCRIPTION ${qi(subscription)}
        CONNECTION '${conn}'
-       PUBLICATION ${publication}
+       PUBLICATION ${qi(publication)}
        WITH (copy_data = ${copyData}, create_slot = false, slot_name = '${slot}')`,
   );
   log.ok(`created subscription ${subscription} (copy_data=${copyData})`);

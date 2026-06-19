@@ -57,13 +57,13 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 - **Rollback has a point of no return** → lossless rollback is free before you repoint the app (step 9e); after that, rolling back to the source loses every write the target took. The runbook has the full per-phase decision tree and an optional reverse-replication escape hatch. See `docs/RUNBOOK.md` §12.
 - **Define abort thresholds before cutover** → the tool owns the data-plane gates (WAL watchdog, lag-drain deadline, `reconcile` verdict, apply-error count); your dashboards own the app-tier gates (5xx, p95, connection saturation). `docs/RUNBOOK.md` §9 maps both to migration-day signals.
 - **New project = new JWT secret + API keys** → existing user sessions/JWTs invalidate (your users re-login), and the app's `SUPABASE_URL` + anon/service keys change. `config-sync` copies settings but **never secrets** — re-enter them by hand.
-- **`config-sync` is a TS port, not yet validated against the live Management API** — always run `--dry-run` and eyeball the diff before applying.
+- **`config-sync`** — always run `--dry-run` and review the shown key/value pairs before applying. Validated at unit level; first live apply on a new project should use `--dry-run` to confirm the API shapes match.
 
 ## Prerequisites
 
 | Tool | Version | Needed for |
 |---|---|---|
-| [Bun](https://bun.sh) | ≥ 1.3 | runs the CLI directly from TypeScript — **no build step**, `pgshift` = `bun run src/cli.ts` |
+| [Bun](https://bun.sh) | ≥ 1.3 | runs the CLI directly from TypeScript — **no build step**. `bin` in `package.json` points at `src/cli.ts`; when installed via `bun add`, Bun compiles it. Node.js is **not** supported. |
 | `supabase` CLI | ≥ 2.x | `config-sync`, `functions`, `storage`, and the auth/roles/schema dump-restore pre-step |
 | `psql` + `pg_dump` | ≥ 15 (17 matches the source) | restoring roles/schema/auth onto the target; loading migrations |
 | Docker + `docker compose` | v2 | **only** for the rehearsal harness and `test:integration` — not for a real migration |
@@ -105,6 +105,8 @@ Development:
 ```bash
 bun test                  # unit suite (fast, no DB)
 bun run test:integration  # live replication/reconcile vs a throwaway Postgres pair (needs Docker)
+bun run test:scale        # 1M-row stress harness (needs Docker, ~10 min)
+bun run test:live <org>   # end-to-end against real throwaway Supabase projects (costs money)
 bun run typecheck         # tsc --noEmit
 bun run check             # biome format + lint
 ```
@@ -367,12 +369,15 @@ src/
   db.ts               source/target postgres clients; subscription conn string
   mgmt.ts             Supabase Management API client
   steps/
+    doctor.ts         automated readiness checklist (pre-migration)
+    run.ts            autonomous pipeline runner (CI/Lambda entry point)
     preflight.ts      read-only gate checks
     replicate.ts      publication + slot + subscription
     watch.ts          sync-state poll + WAL bloat watchdog
     reconcile.ts      counts + content-hash + ledger proof
-    cutover.ts        lag drain + drop subscription
+    cutover.ts        lag drain + sequence resync + drop subscription
     teardown.ts       safe ordered cleanup
+    status.ts         one-shot replication snapshot (for scheduled watchers)
     config-sync.ts    Management API config copy (secrets stripped)
     cli-wrappers.ts   supabase functions/storage wrappers
   rehearsal/

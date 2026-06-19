@@ -1,14 +1,16 @@
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
+import { withRetry } from "../db.ts";
 import { log } from "../log.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const qi = (s: string) => `"${s.replace(/"/g, '""')}"`;
 
 /**
  * Final cutover. Caller MUST have already stopped application writes to the source.
  *  1. wait for replication lag -> 0
  *  2. (sequences) re-sync any sequences listed (none for uuid/text PKs)
- *  3. drop the subscription on the target
+ *  3. drop the subscription on the target (safely: DISABLE → detach slot → DROP)
  *
  * Does NOT repoint your app or re-enable source writes — that is a human decision.
  * Never re-enable writes on the source afterwards (split-brain).
@@ -53,10 +55,16 @@ export async function cutover(
   }
 
   // 1. drain lag
+  // H-5: wrap each poll query in withRetry — a transient network blip at the most
+  // irreversible step of the migration must not abort cutover mid-drain.
   for (;;) {
-    const [row] = await source`
-      SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS lag_bytes
-      FROM pg_replication_slots WHERE slot_name = ${slot}`;
+    const [row] = await withRetry(
+      () =>
+        source`
+          SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn) AS lag_bytes
+          FROM pg_replication_slots WHERE slot_name = ${slot}`,
+      "cutover/lag-drain",
+    );
     const lag = Number(row?.lag_bytes ?? 0);
     log.info(`replication lag ${(lag / 1024).toFixed(1)} KB`);
     if (lag <= 0) {
@@ -107,8 +115,13 @@ export async function cutover(
     }
   }
 
-  // 3. drop subscription
-  await target.unsafe(`DROP SUBSCRIPTION ${subscription}`);
+  // 3. drop subscription — C-4: use the safe three-step sequence from teardown.ts:
+  //    DISABLE (stops the walreceiver) → SET slot_name=NONE (detaches remote slot so
+  //    DROP doesn't try to drop it on the source) → DROP.
+  //    Skipping DISABLE risks a DROP that hangs waiting for an active walreceiver.
+  await target.unsafe(`ALTER SUBSCRIPTION ${qi(subscription)} DISABLE`);
+  await target.unsafe(`ALTER SUBSCRIPTION ${qi(subscription)} SET (slot_name = NONE)`);
+  await target.unsafe(`DROP SUBSCRIPTION ${qi(subscription)}`);
   log.ok(`dropped subscription ${subscription}`);
   log.warn(
     "Now: repoint your app to the target, verify, and DO NOT re-enable writes on the source.",

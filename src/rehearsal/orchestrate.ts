@@ -41,26 +41,34 @@ export async function rehearseRun(
     concurrency: opts.concurrency,
   });
 
-  const r = await run(source, target, cfg, secrets, { through: "reconcile" });
-  if (!r.ok) {
-    log.err("rehearsal: migration pipeline failed before the fault gate");
-    return false;
-  }
-
+  // H-3: always teardown, even on early failure — the previous code returned false
+  // before teardown, leaving a stale slot/publication/subscription behind.
+  let pipelineOk = false;
   let gateOk = true;
-  if (opts.chaos) {
-    log.step(`rehearsal fault gate: ${opts.chaos}`);
-    await runChaos({ source, target, arg: opts.chaosArg }, opts.chaos);
-    const stillMatches = await reconcile(source, target, cfg);
-    if (stillMatches) {
-      log.err(`fault gate MISSED — reconcile passed after '${opts.chaos}' (should have failed)`);
-      gateOk = false;
-    } else {
-      log.ok(`fault gate OK — reconcile correctly caught '${opts.chaos}'`);
+  try {
+    const r = await run(source, target, cfg, secrets, { through: "reconcile" });
+    if (!r.ok) {
+      log.err("rehearsal: migration pipeline failed before the fault gate");
+      return false;
     }
+    pipelineOk = true;
+
+    if (opts.chaos) {
+      log.step(`rehearsal fault gate: ${opts.chaos}`);
+      await runChaos({ source, target, arg: opts.chaosArg }, opts.chaos);
+      const stillMatches = await reconcile(source, target, cfg);
+      if (stillMatches) {
+        log.err(`fault gate MISSED — reconcile passed after '${opts.chaos}' (should have failed)`);
+        gateOk = false;
+      } else {
+        log.ok(`fault gate OK — reconcile correctly caught '${opts.chaos}'`);
+      }
+    }
+  } finally {
+    await teardown(source, target, cfg);
   }
 
-  await teardown(source, target, cfg);
-  gateOk ? log.ok("rehearsal complete") : log.err("rehearsal complete with gate failure");
-  return gateOk;
+  const ok = pipelineOk && gateOk;
+  ok ? log.ok("rehearsal complete") : log.err("rehearsal complete with gate failure");
+  return ok;
 }

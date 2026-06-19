@@ -1,6 +1,7 @@
 import type { Config, Secrets } from "../config.ts";
 import { classifyConn, connect, type Db } from "../db.ts";
 import { log } from "../log.ts";
+import { subscribeGrantSQL } from "./checks.ts";
 
 /**
  * `doctor` — an automated, re-runnable readiness checklist.
@@ -314,11 +315,10 @@ async function targetChecks(
     else s.ok("target version ≥ source");
   }
 
-  const [sub] = await target`
-    SELECT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS is_super,
-           pg_has_role(current_user, 'pg_create_subscription', 'MEMBER') AS has_grant`;
+  // C-1: pg_has_role('pg_create_subscription') throws on PG15 — version-gate via shared helper.
+  const [sub] = await target.unsafe(subscribeGrantSQL(tgtNum));
   if (sub?.is_super || sub?.has_grant) s.ok("target role can CREATE SUBSCRIPTION");
-  else if (tgtNum < 160000)
+  else if (tgtNum < 160_000)
     s.warn("PG15 target + non-superuser — CREATE SUBSCRIPTION may be blocked; smoke-test it");
   else s.fail("target role lacks pg_create_subscription membership");
 
@@ -342,16 +342,23 @@ async function targetChecks(
   }
 
   // is the schema loaded on the target yet? (logical replication does NOT carry DDL)
+  // M-10: also check for partitioned tables (relkind='p') and warn about ONLY limitation.
   for (const qt of cfg.replication.tables) {
     const [schema, table] = qt.split(".");
     const [row] = await target`
-      SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = ${schema ?? ""} AND c.relname = ${table ?? ""} AND c.relkind = 'r'`;
-    row
-      ? s.ok(`target table ${qt} exists (schema loaded)`)
-      : s.fail(
-          `target table ${qt} MISSING — load the schema on the target before replicate (DDL is not replicated)`,
-        );
+      SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = ${schema ?? ""} AND c.relname = ${table ?? ""}
+        AND c.relkind IN ('r','p')`;
+    if (!row) {
+      s.fail(`target table ${qt} MISSING — load the schema on the target before replicate (DDL is not replicated)`);
+    } else if (row.relkind === "p") {
+      s.warn(
+        `${qt} is a PARTITIONED TABLE — reconcile scans ONLY the parent partition root and ` +
+          "will miss rows in child partitions.",
+      );
+    } else {
+      s.ok(`target table ${qt} exists (schema loaded)`);
+    }
   }
 
   // If the subscription already exists, every published table must appear in

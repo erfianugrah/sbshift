@@ -1,5 +1,10 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
-import { type BucketRow, classifyRows, diffBuckets } from "../src/steps/reconcile.ts";
+import { ConfigSchema } from "../src/config.ts";
+import type { Db } from "../src/db.ts";
+import { type BucketRow, classifyRows, diffBuckets, reconcileLedger } from "../src/steps/reconcile.ts";
 
 const mk = (entries: Array<[number, number, string]>): Map<number, BucketRow> =>
   new Map(entries.map(([b, n, h]) => [b, { b, n: BigInt(n), h }]));
@@ -78,5 +83,67 @@ describe("classifyRows", () => {
     ]);
     const t = new Map<string, string>();
     expect(classifyRows(s, t, 2)).toHaveLength(2);
+  });
+});
+
+// M-4: reconcileLedger was unexported and untested. It's now exported.
+// Use a mock Db that returns controlled results without a real Postgres connection.
+describe("reconcileLedger", () => {
+  const dir = join(tmpdir(), `pgshift-test-${Date.now()}`);
+  mkdirSync(dir, { recursive: true });
+
+  function makeCfg(ledgerPath: string) {
+    return ConfigSchema.parse({
+      source: { ref: "a".repeat(20) },
+      target: { ref: "b".repeat(20) },
+      replication: { tables: ["public.t"], publication: "p", slot: "s", subscription: "sub" },
+      reconcile: {
+        tables: [{ name: "public.t" }],
+        ledgerPath,
+        ledgerTable: "public.t",
+        ledgerIdColumn: "id",
+      },
+      watchdog: { maxRetainedWalMb: 1000, pollIntervalSec: 1, syncTimeoutMin: 1 },
+    });
+  }
+
+  test("empty ledger -> true without querying DB", async () => {
+    const path = join(dir, "empty.log");
+    writeFileSync(path, "");
+    // A DB that throws if queried — should never be reached for an empty ledger.
+    const throwDb = { unsafe: () => { throw new Error("DB queried on empty ledger"); } } as unknown as Db;
+    expect(await reconcileLedger(throwDb, makeCfg(path))).toBe(true);
+  });
+
+  test("all ids present -> true", async () => {
+    const path = join(dir, "all-present.log");
+    writeFileSync(path, "id1\nid2\nid3\n");
+    // Mock DB returns 0 missing rows.
+    const mockDb = { unsafe: async () => [{ n: 0n }] } as unknown as Db;
+    expect(await reconcileLedger(mockDb, makeCfg(path))).toBe(true);
+  });
+
+  test("missing ids -> false", async () => {
+    const path = join(dir, "missing.log");
+    writeFileSync(path, "id1\nid2\nid3\n");
+    // Mock DB reports 2 missing.
+    const mockDb = { unsafe: async () => [{ n: 2n }] } as unknown as Db;
+    expect(await reconcileLedger(mockDb, makeCfg(path))).toBe(false);
+  });
+
+  test("batching: large ledger is split correctly (verify SQL called with slices)", async () => {
+    const ids = Array.from({ length: 25_000 }, (_, i) => `id${i}`);
+    const path = join(dir, "large.log");
+    writeFileSync(path, ids.join("\n") + "\n");
+    const calls: number[] = [];
+    const mockDb = {
+      unsafe: async (_sql: string, params: unknown[]) => {
+        calls.push((params[0] as string[]).length);
+        return [{ n: 0n }];
+      },
+    } as unknown as Db;
+    expect(await reconcileLedger(mockDb, makeCfg(path))).toBe(true);
+    // 25 000 ids in batches of 10 000 -> 3 calls: 10k + 10k + 5k
+    expect(calls).toEqual([10_000, 10_000, 5_000]);
   });
 });

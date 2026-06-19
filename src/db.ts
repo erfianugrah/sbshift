@@ -25,19 +25,26 @@ export function isTransient(e: unknown): boolean {
  * Run a query-producing fn, retrying ONLY transient connection errors with
  * exponential backoff. For long phases (reconcile's multi-minute table scans,
  * watch's hours-long poll) a single network blip should not abort the operation.
+ *
+ * L-12: parameter renamed from `max` to `maxAttempts` to avoid ambiguity
+ * (max=1 means 1 attempt, 0 retries — not "max 1 retry").
  */
-export async function withRetry<T>(fn: () => Promise<T>, label: string, max = 4): Promise<T> {
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  label: string,
+  maxAttempts = 4,
+): Promise<T> {
   let attempt = 0;
   for (;;) {
     try {
       return await fn();
     } catch (e) {
       attempt++;
-      if (attempt >= max || !isTransient(e)) throw e;
+      if (attempt >= maxAttempts || !isTransient(e)) throw e;
       const backoffMs = Math.min(1000 * 2 ** (attempt - 1), 8000);
       const msg = e instanceof Error ? e.message : String(e);
       log.warn(
-        `${label}: transient error (attempt ${attempt}/${max}), retrying in ${backoffMs}ms: ${msg}`,
+        `${label}: transient error (attempt ${attempt}/${maxAttempts}), retrying in ${backoffMs}ms: ${msg}`,
       );
       await sleep(backoffMs);
     }
@@ -68,7 +75,9 @@ export function connect(
     connection: {
       statement_timeout: 0,
       idle_in_transaction_session_timeout: 0,
-      lock_timeout: 0,
+      // M-2: 0 means DDL waits forever for a lock; 30 s covers normal contention
+      // without blocking indefinitely if a long transaction holds the table lock.
+      lock_timeout: 30_000,
       TimeZone: "UTC",
       DateStyle: "ISO, YMD",
       IntervalStyle: "postgres",
@@ -87,15 +96,6 @@ export function connect(
   };
 }
 
-/**
- * The libpq-style CONNECTION string the TARGET subscription uses to reach the
- * SOURCE. Uses SOURCE_REPLICATION_URL when set (the source DIRECT host, required
- * because the pooler can't stream WAL), else SOURCE_DB_URL.
- *
- * sslmode defaults to `require` (Supabase mandates TLS), but is overridable via
- * an `?sslmode=` query param so the integration tier can point at a plain
- * (non-TLS) Postgres with `?sslmode=disable`.
- */
 /** What kind of endpoint a connection string points at — drives doctor warnings. */
 export interface ConnInfo {
   host: string;
@@ -121,16 +121,18 @@ export function classifyConn(url: string): ConnInfo {
   };
 }
 
-export function sourceConnString(secrets: Secrets): string {
-  const u = new URL(secrets.SOURCE_REPLICATION_URL ?? secrets.SOURCE_DB_URL);
-  const sslmode = u.searchParams.get("sslmode") || "require";
-  const parts = [
-    `host=${u.hostname}`,
-    `port=${u.port || "5432"}`,
-    `user=${decodeURIComponent(u.username)}`,
-    `password=${decodeURIComponent(u.password)}`,
-    `dbname=${u.pathname.replace(/^\//, "") || "postgres"}`,
-    `sslmode=${sslmode}`,
-  ];
-  return parts.join(" ");
+/**
+ * C-2 fix: use the raw URL as the libpq CONNECTION string.
+ *
+ * The previous keyword=value builder had unquoted values — a password containing
+ * a space breaks libpq tokenisation before quoting can rescue it. PostgreSQL's
+ * CREATE SUBSCRIPTION accepts URL format natively; percent-encoding in the URL
+ * means no quoting layer is needed.
+ *
+ * Kept as a named export so callers are explicit about which URL they're using.
+ * replicate.ts uses SOURCE_REPLICATION_URL (direct host) when set; this function
+ * returns exactly that value so the caller's intent is clear.
+ */
+export function sourceConnUrl(secrets: Secrets): string {
+  return secrets.SOURCE_REPLICATION_URL ?? secrets.SOURCE_DB_URL;
 }

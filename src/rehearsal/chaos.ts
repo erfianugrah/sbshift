@@ -94,18 +94,28 @@ export const SCENARIOS: Record<ScenarioName, Scenario> = {
 
   "tsearch-drift": {
     describe:
-      "Change default_text_search_config on the target session (would break a naive hash that included search_vector).",
+      "Change default_text_search_config on the target (would break a naive hash that included search_vector).",
     expect: "reconcile must still PASS — we exclude generated columns, proving the guard works.",
     run: async ({ target }) => {
+      // H-2: ALTER DATABASE is a persistent, database-level GUC change that survives
+      // teardown. We revert it here rather than printing a hint that may be missed.
       await target.unsafe(
         `ALTER DATABASE postgres SET default_text_search_config = 'pg_catalog.simple'`,
       );
       log.ok(
         "target default_text_search_config = simple — reconcile should STILL pass (search_vector excluded)",
       );
-      log.detail(
-        "revert: ALTER DATABASE postgres SET default_text_search_config = 'pg_catalog.english'",
-      );
+      try {
+        await target.unsafe(
+          `ALTER DATABASE postgres RESET default_text_search_config`,
+        );
+        log.detail("target default_text_search_config reset to cluster default");
+      } catch (e) {
+        log.warn(
+          `tsearch-drift revert failed (${e instanceof Error ? e.message : e}) — ` +
+            "run: ALTER DATABASE postgres RESET default_text_search_config",
+        );
+      }
     },
   },
 };

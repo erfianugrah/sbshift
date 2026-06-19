@@ -34,8 +34,16 @@ services:
       timeout: 3s
       retries: 30
 
+  # L-16: match the rehearsal compose settings so the integration tier exercises
+  # the same worker capacity limits as the real prod-scale environment.
   target:
     image: postgres:16
+    command:
+      - postgres
+      - -c
+      - max_logical_replication_workers=4
+      - -c
+      - max_worker_processes=8
     environment:
       POSTGRES_PASSWORD: pw
     healthcheck:

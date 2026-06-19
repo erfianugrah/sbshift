@@ -70,7 +70,23 @@ export class MgmtApi {
     const { pollSec = 15, timeoutMin = 10 } = opts;
     const deadline = Date.now() + timeoutMin * 60_000;
     for (;;) {
-      const statuses = await Promise.all(refs.map((r) => this.getProject(r).then((p) => p.status)));
+      // L-3: tolerate transient 503s during the provision poll — a network blip
+      // during a 10-minute wait should not abort the entire harness.
+      let statuses: string[];
+      try {
+        statuses = await Promise.all(
+          refs.map((r) => this.getProject(r).then((p) => p.status)),
+        );
+      } catch (e) {
+        log.warn(
+          `waitHealthy: transient error polling project status — ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+        if (Date.now() >= deadline) throw new Error("timed out waiting for ACTIVE_HEALTHY");
+        await sleep(pollSec * 1_000);
+        continue;
+      }
       if (statuses.every((s) => s === "ACTIVE_HEALTHY")) return;
       if (Date.now() >= deadline) throw new Error("timed out waiting for ACTIVE_HEALTHY");
       log.detail(`waiting for ACTIVE_HEALTHY — ${statuses.join(", ")}`);

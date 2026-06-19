@@ -49,6 +49,8 @@ export interface RunOptions {
   json?: boolean;
   confirmWritesStopped?: boolean;
   maxLagWaitSec?: number;
+  /** L-4: thread outDir through to reconcile so the JSON report goes to the right place. */
+  outDir?: string;
   reconcile?: { mode?: ReconcileMode; buckets?: number; maxExamples?: number };
 }
 
@@ -111,7 +113,7 @@ async function runPhase(
     case "watch":
       return watch(source, target, cfg);
     case "reconcile": {
-      const ok = await reconcile(source, target, cfg, opts.reconcile);
+      const ok = await reconcile(source, target, cfg, { ...opts.reconcile, outDir: opts.outDir });
       if (!ok) throw new Error("reconcile reported a mismatch");
       return;
     }

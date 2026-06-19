@@ -1,6 +1,7 @@
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import { log } from "../log.ts";
+import { subscribeGrantSQL } from "./checks.ts";
 
 /** Read-only checks that must pass before we touch anything. Throws on hard failures. */
 export async function preflight(source: Db, target: Db, cfg: Config): Promise<void> {
@@ -13,8 +14,13 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
   const srcNum = Number(srcV?.server_version_num ?? 0);
   const tgtNum = Number(tgtV?.server_version_num ?? 0);
   log.detail(`source PG ${srcNum} / target PG ${tgtNum}`);
-  if (srcNum < 100000) {
-    log.err("source is < PG10 — logical replication unavailable");
+  // M-8: raise floor to PG15; pg_stat_subscription_stats (used in watch) is PG15+
+  if (srcNum < 150_000) {
+    log.err("source is < PG15 — logical replication is available from PG10 but this tool requires PG15+ (pg_stat_subscription_stats, pg_stat_progress_copy)");
+    hardFail = true;
+  }
+  if (tgtNum < 150_000) {
+    log.err("target is < PG15 — same requirement as source");
     hardFail = true;
   }
   if (tgtNum < srcNum) {
@@ -33,15 +39,13 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
   }
 
   // 3. Target can CREATE SUBSCRIPTION (documented-supported, but verify the role grant).
-  //    PG16+: needs pg_create_subscription membership; PG15: superuser.
-  const [sub] = await target`
-    SELECT
-      (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) AS is_super,
-      pg_has_role(current_user, 'pg_create_subscription', 'MEMBER') AS has_grant`;
+  //    PG16+: needs pg_create_subscription membership; PG15: superuser only.
+  //    C-1: pg_has_role('pg_create_subscription') throws on PG15 — version-gate the SQL.
+  const [sub] = await target.unsafe(subscribeGrantSQL(tgtNum));
   const canSubscribe = sub?.is_super || sub?.has_grant;
   if (canSubscribe) {
     log.ok("target role can CREATE SUBSCRIPTION");
-  } else if (tgtNum < 160000) {
+  } else if (tgtNum < 160_000) {
     log.warn(
       "PG15 target + non-superuser role — CREATE SUBSCRIPTION may be blocked; smoke-test before relying on it",
     );
@@ -51,10 +55,11 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
   }
 
   // 4. Every published table has a replica identity (PK / replica index / FULL).
+  //    M-10: also check for partitioned tables — reconcile uses ONLY which skips children.
   for (const qt of cfg.replication.tables) {
     const [schema, table] = qt.split(".");
     const [r] = await source`
-      SELECT c.relreplident,
+      SELECT c.relreplident, c.relkind,
              EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary) AS has_pk
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = ${schema ?? ""} AND c.relname = ${table ?? ""}`;
@@ -62,6 +67,12 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
       log.err(`published table ${qt} not found on source`);
       hardFail = true;
       continue;
+    }
+    if (r.relkind === "p") {
+      log.warn(
+        `${qt} is a PARTITIONED TABLE — reconcile scans ONLY the parent partition root and ` +
+          "will miss rows in child partitions. Either reconcile each partition individually or use `--mode full` with caution.",
+      );
     }
     // relreplident: d=default(uses PK), f=full, i=index, n=nothing.
     // A PK existing is NOT enough — if relreplident='n' there is no replica

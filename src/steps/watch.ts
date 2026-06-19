@@ -156,6 +156,22 @@ export async function watch(source: Db, target: Db, cfg: Config): Promise<void> 
         );
       }
 
+      // M-5: detect total===0 after the subscription is established.
+      // pg_subscription_rel is empty when: the subscription name is wrong, the
+      // walreceiver never attached, or max_replication_workers=0. Without this
+      // check the loop spins silently until syncTimeoutMin expires.
+      if (total === 0 && pollCount > 3) {
+        const [subState] = await target`
+          SELECT subenabled FROM pg_subscription WHERE subname = ${subscription}`;
+        if (subState?.subenabled) {
+          log.warn(
+            `subscription ${subscription} has been running for ${pollCount} polls but ` +
+              "0 tables appear in pg_subscription_rel — verify the subscription name in " +
+              "config matches exactly and that a walreceiver process has started.",
+          );
+        }
+      }
+
       if (total > 0 && ready === total) {
         log.ok(`all ${total} tables synced (srsubstate='r')`);
         return;

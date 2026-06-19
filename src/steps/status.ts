@@ -64,7 +64,10 @@ export async function status(source: Db, target: Db, cfg: Config): Promise<Statu
       exists: Boolean(slotRow),
       active: Boolean(slotRow?.active),
       walRetainedMb: Math.round(Number(slotRow?.retained_bytes ?? 0) / 1_048_576),
-      lagBytes: Number(slotRow?.lag_bytes ?? 0),
+      // L-6: clamp to 0 — pg_wal_lsn_diff can transiently return a negative value
+      // (confirmed_flush_lsn momentarily exceeds pg_current_wal_lsn during slot
+      // recreation). Negative lag has no meaningful interpretation for callers.
+      lagBytes: Math.max(0, Number(slotRow?.lag_bytes ?? 0)),
     },
   };
 }
