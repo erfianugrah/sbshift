@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readFileSync } from "node:fs";
 import { Command } from "commander";
 import { type Config, loadConfig, loadSecrets } from "./config.ts";
 import { connect, type Db } from "./db.ts";
@@ -20,9 +21,14 @@ import { printStatus, status } from "./steps/status.ts";
 import { teardown } from "./steps/teardown.ts";
 import { watch } from "./steps/watch.ts";
 
+const { version } = JSON.parse(
+  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+) as { version: string };
+
 const program = new Command();
 program
   .name("sbmigrate")
+  .version(version, "-V, --version")
   .description(
     "Cross-region Supabase migration orchestrator (logical replication).\n" +
       "Step-by-step runbook: docs/RUNBOOK.md. Start with `sbmigrate doctor`.",

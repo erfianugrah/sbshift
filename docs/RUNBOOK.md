@@ -231,7 +231,14 @@ bun start config-sync
 
 This copies Auth / Realtime / PostgREST / Storage / pooler settings via the Management API
 (needs `SUPABASE_ACCESS_TOKEN` in `.env`). **Secrets are never copied** — re-enter SMTP /
-OAuth / JWT secrets on the target by hand in the dashboard.
+OAuth / JWT secrets on the target by hand in the dashboard. `config-sync` is a TS port that
+has **not** been validated against the live Management API — always `--dry-run` and review
+the diff before applying.
+
+> **The new project has a new JWT secret + anon/service keys.** Every existing user JWT and
+> session is signed with the OLD secret, so all users (the 3 here) must **re-login** after
+> cutover. Update the app's `SUPABASE_URL` + `SUPABASE_SECRET_KEY` (the Worker secrets) to
+> the new project as part of step 9e.
 
 For example-app specifically:
 - **Storage** objects: none → skip (`supabase storage` step not needed).

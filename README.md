@@ -34,6 +34,8 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 - **Direct connection, not pooler**; target needs IPv6 (or the source's IPv4 add-on).
 - **Teardown order** → disable → `SET (slot_name = NONE)` → drop subscription → drop slot → drop publication, or it hangs.
 - **Never re-enable writes on the source** after cutover (split-brain) — `cutover` says so.
+- **New project = new JWT secret + API keys** → existing user sessions/JWTs invalidate (your users re-login), and the app's `SUPABASE_URL` + anon/service keys change. `config-sync` copies settings but **never secrets** — re-enter them by hand.
+- **`config-sync` is a TS port, not yet validated against the live Management API** — always run `--dry-run` and eyeball the diff before applying.
 
 ## Prerequisites
 

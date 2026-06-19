@@ -12,9 +12,23 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function watch(source: Db, target: Db, cfg: Config): Promise<void> {
   log.step("watch: initial sync + WAL watchdog");
-  const { slot } = cfg.replication;
+  const { slot, publication } = cfg.replication;
   const { maxRetainedWalMb, pollIntervalSec, syncTimeoutMin } = cfg.watchdog;
   const deadline = Date.now() + syncTimeoutMin * 60_000;
+
+  // Expected copy volume (heap+toast of published tables on the source) so the
+  // long initial COPY shows a % instead of a static 0/N for hours. Best-effort.
+  let expectedBytes = 0;
+  try {
+    const [r] = await source.unsafe(
+      `SELECT coalesce(sum(pg_table_size(format('%I.%I', schemaname, tablename)::regclass)), 0)::bigint AS b
+       FROM pg_publication_tables WHERE pubname = $1`,
+      [publication],
+    );
+    expectedBytes = Number(r?.b ?? 0);
+  } catch {
+    /* non-fatal: progress % just won't show */
+  }
 
   for (;;) {
     // WAL retained by the slot on the source (bytes)
@@ -34,10 +48,29 @@ export async function watch(source: Db, target: Db, cfg: Config): Promise<void> 
     const total = states.reduce((a, s) => a + Number(s.n), 0);
     const ready = Number(byState.r ?? 0);
 
+    // Live COPY progress from the subscriber's tablesync workers (PG14+).
+    let copyMsg = "";
+    if (total === 0 || ready < total) {
+      try {
+        const [cp] = await target`
+          SELECT coalesce(sum(bytes_processed), 0)::bigint AS b, count(*)::int AS n
+          FROM pg_stat_progress_copy`;
+        const copied = Number(cp?.b ?? 0);
+        if (Number(cp?.n ?? 0) > 0 || copied > 0) {
+          const gb = (n: number) => (n / 1_073_741_824).toFixed(1);
+          const pct = expectedBytes > 0 ? ` ~${((copied / expectedBytes) * 100).toFixed(0)}%` : "";
+          copyMsg = ` | copying ${gb(copied)}/${gb(expectedBytes)}GB${pct}`;
+        }
+      } catch {
+        /* pg_stat_progress_copy needs PG14+; skip if unavailable */
+      }
+    }
+
     log.info(
       `sync ${ready}/${total} ready ` +
         `(init=${byState.i ?? 0} copy=${byState.d ?? 0} synced=${byState.s ?? 0}) | ` +
-        `WAL retained ${retainedMb.toFixed(0)}MB | slot ${walRow?.active ? "active" : "INACTIVE"}`,
+        `WAL retained ${retainedMb.toFixed(0)}MB | slot ${walRow?.active ? "active" : "INACTIVE"}` +
+        copyMsg,
     );
 
     if (retainedMb > maxRetainedWalMb) {
