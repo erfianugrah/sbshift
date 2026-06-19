@@ -59,7 +59,7 @@ configSync:
   dbPostgres: false # compute/disk are region/plan specific — usually leave off
 
 storage:
-  buckets: [] # example-app stores document bodies in Postgres, not Storage
+  buckets: [] # example app stores document bodies in Postgres, not Storage
 
 functions:
-  enabled: false # example-app runs on elsewhere, not Supabase Edge Functions
+  enabled: false # example app serves data elsewhere, not Supabase Edge Functions

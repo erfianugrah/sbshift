@@ -1,6 +1,6 @@
-# Scale rehearsal harness: a throwaway source + target (example-app-shaped schema)
+# Scale rehearsal harness: a throwaway source + target (example document schema)
 # plus a persistent bun runner, all on one network. NEVER points at a real
-# Supabase project — this is for emulating prod scale (e.g. ~large) on disposable
+# Supabase project — this is for emulating prod scale (e.g. hundreds of GB) on disposable
 # local Postgres.
 #
 #   docker compose -f docker-compose.rehearsal.yml up -d

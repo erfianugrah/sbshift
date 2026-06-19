@@ -78,7 +78,7 @@ export function connect(
     //     Source and target are different projects (different regions) — if any of
     //     these differ, identical data hashes differently => FALSE reconcile
     //     mismatch. Pinning them identically on both sides makes the hash stable.
-    //  2. Resilience: a full-table hash scan over a large table runs for minutes;
+    //  2. Resilience: a full-table hash scan over a large (100s of GB) table runs for minutes;
     //     Supabase sets a default statement_timeout that would kill it mid-scan.
     connection: {
       statement_timeout: 0,

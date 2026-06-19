@@ -1,4 +1,4 @@
--- Example-app-shaped schema for the scale rehearsal. Loaded on BOTH the source
+-- Example document schema for the scale rehearsal. Loaded on BOTH the source
 -- and the target (logical replication does not create tables on the subscriber).
 -- Mirrors migrate.config.example.yaml columns + the four gotchas the annoying
 -- integration schema exercises, so the rehearsal validates the same code paths:

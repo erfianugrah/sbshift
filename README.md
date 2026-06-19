@@ -1,7 +1,7 @@
 # pgshift
 
 Typed CLI orchestrator for **near-zero-downtime Postgres-to-Postgres migration** via native
-logical replication. Built for the large-class case where a plain dump/restore window is
+logical replication. Built for the large-database case where a plain dump/restore window is
 unacceptable.
 
 The core engine — `replicate → watch → reconcile → cutover → teardown` — is **generic
@@ -38,7 +38,7 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 - **Needs an ACTIVE source** → logical replication streams live WAL, so the source must be running with `wal_level=logical`. A **paused** project (especially one paused **> 90 days**, no longer restorable via Studio) cannot stream WAL — this tool does not apply; use the offline backup-download + restore path instead (see Prerequisites). This is a wrong-tool condition, not an in-flight hazard.
 - **`FOR ALL TABLES` needs superuser** → we always create an empty publication and `ADD TABLE` explicitly.
 - **`copy_data = true`** → the subscription does a consistent initial copy; no fragile `pg_dump --snapshot` dance (the SQL-created slot can't export a snapshot anyway).
-- **Generated columns** (e.g. `documents.search_vector`) are recomputed on the subscriber and are **excluded from the reconciliation hash** — hashing them causes false mismatches. They are **not free during the initial copy**: a heavy STORED generated column (a large `tsvector` over big text) is recomputed per row on the subscriber, and that CPU cost — not network/disk — bottlenecks the copy. Measured in the large rehearsal: **~11 MiB/s with the `search_vector` column vs ~80 MiB/s raw seed (~7× slower)**. For very large such columns, consider defining them as plain (non-generated) on the target during sync and converting to generated *after* the copy, or just budget the extra hours. `watch` now shows a live copy `%`.
+- **Generated columns** (e.g. a STORED `tsvector` column) are recomputed on the subscriber and are **excluded from the reconciliation hash** — hashing them causes false mismatches. They are **not free during the initial copy**: a heavy STORED generated column (a large `tsvector` over big text) is recomputed per row on the subscriber, and that CPU cost — not network/disk — bottlenecks the copy. Measured in a large-scale rehearsal: **~11 MiB/s with the generated column vs ~80 MiB/s raw seed (~7× slower)**. For very large such columns, consider defining them as plain (non-generated) on the target during sync and converting to generated *after* the copy, or just budget the extra hours. `watch` now shows a live copy `%`.
 - **WAL bloat is the #1 outage** → `watch` aborts if the slot retains more than `watchdog.maxRetainedWalMb` on the source.
 - **Slot invalidation is unrecoverable** → if the source recycles WAL the subscriber never read (`max_slot_wal_keep_size` exceeded), the slot's `wal_status` flips to `lost` and replication is **permanently dead**. `watch` throws immediately on `wal_status=lost` (rather than spinning) and warns as it leaves `reserved`/`extended`.
 - **A stuck subscription fails silently** → a tablesync/apply worker that error-loops (constraint violation, type mismatch, row conflict) leaves the table stuck below `srsubstate='r'` forever. `watch` reads `pg_stat_subscription_stats` and warns when `apply_error_count`/`sync_error_count` are *rising*, and warns if the subscription has **no running worker** (`pid` null = disabled/crashed).
@@ -50,7 +50,7 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 - **Stable reconcile hash across regions** → row hashes render `row::text`, which depends on `TimeZone`/`DateStyle`/`IntervalStyle`/`extra_float_digits`/`bytea_output`. Source and target are different projects, so every connection in both pools pins these GUCs identically (and sets `statement_timeout=0` so a multi-minute full-table scan isn't killed).
 - **Replica identity** → `preflight` fails any published table lacking a PK / unique index / `REPLICA IDENTITY FULL`.
 - **Subscriber privilege** → `preflight` checks the target role can `CREATE SUBSCRIPTION` (documented-supported, but verified).
-- **Cross-schema FKs (the `auth.users` trap)** → `public.documents.user_id` references `auth.users`. `auth` is not replicated, so its data must be restored on the target *before* the initial copy or every row is FK-rejected. `doctor` flags it; see "What this tool does NOT replicate".
+- **Cross-schema FKs (the `auth.users` trap)** → a replicated table with an FK into `auth.users` (e.g. `public.<table>.user_id`). `auth` is not replicated, so its data must be restored on the target *before* the initial copy or every row is FK-rejected. `doctor` flags it; see "What this tool does NOT replicate".
 - **Direct connection, not pooler**; target needs IPv6 (or the source's IPv4 add-on). **If pgshift itself runs from a host without IPv6** to the direct hosts, point `SOURCE_DB_URL`/`TARGET_DB_URL` at the IPv4 **session pooler** (port 5432) for admin/seed/reconcile and set **`SOURCE_REPLICATION_URL`** to the source direct host — the subscription streams from there (the target's walreceiver reaches it over Supabase's internal network) while the pooler can't stream WAL. `doctor` validates the split. *Verified live: the full pipeline (replicate→watch→reconcile→cutover, incl. `CREATE SUBSCRIPTION` through the session pooler) ran end-to-end from a non-IPv6 box against a real cross-region Supabase pair.*
 - **Teardown order** → disable → `SET (slot_name = NONE)` → drop subscription → drop slot → drop publication, or it hangs.
 - **Never re-enable writes on the source** after cutover (split-brain) — `cutover` says so.
@@ -125,9 +125,8 @@ classifies each URL and tells you which situation you're in.
 Logical replication moves **row data for the tables you list**, and nothing else. It does
 not carry DDL, roles, sequences-as-DDL, or the Supabase-managed `auth` / `storage` schemas.
 For a Supabase→Supabase move you must restore those onto the target **before** `replicate`,
-or the initial copy fails — `public.documents.user_id` has an FK into `auth.users`, so copying
-`documents` into a target with an empty `auth.users` is rejected row-by-row. `doctor` flags any
-such cross-schema FK.
+or the initial copy fails — any FK from a replicated table into `auth.users` rejects every
+row while the target's `auth.users` is empty. `doctor` flags any such cross-schema FK.
 
 The Supabase-blessed dump/restore (see
 [Migrating within Supabase](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore))
@@ -146,8 +145,7 @@ psql --single-transaction --variable ON_ERROR_STOP=1 \
   --file auth.sql --dbname "$TARGET_DB_URL"
 ```
 
-Also enable any **non-default extensions** on the target first (example-app uses `pg_cron`,
-`pgcrypto`, `uuid-ossp`, `pg_stat_statements`, `hypopg`, `index_advisor`, `supabase_vault`) —
+Also enable any **non-default extensions** on the target first —
 `doctor` diffs source vs target extensions and lists the missing ones.
 
 ## Using pgshift for non-Supabase migrations
@@ -175,7 +173,7 @@ them to whatever your environment prefers in `migrate.config.yaml`.
 
 ## Runbook
 
-**Full idiot-proof, verified, step-by-step procedure for example-app:
+**Full step-by-step procedure:
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md)** — including the connectivity decision, the auth/roles/
 extensions dump-restore pre-step, the billable target-creation step, and abort/rollback. The
 block below is the quick reference.
@@ -193,7 +191,7 @@ bun start preflight
 # 1. on the TARGET first (logical replication does NOT carry DDL):
 #    a) enable non-default extensions (see "What this tool does NOT replicate")
 #    b) restore roles + schema + auth/storage DATA via dump/restore (auth.users
-#       must exist before the copy or the documents FK rejects every row)
+#       must exist before the copy or the FK into auth.users rejects every row)
 #    c) load app schema. Skip the pg_cron schedule migration so the target
 #       doesn't run cleanup independently while both DBs are live:
 for f in $(ls path/to/supabase/migrations/*.sql | grep -v scheduled_jobs); do
@@ -276,7 +274,7 @@ bun start rehearse writer --ledger ledger/written_ids.log
 
 ### Chunked reconciliation (prod-grade)
 
-A single `sum(hash)` over a large table is a synchronized full scan on both sides and only
+A single `sum(hash)` over a multi-hundred-GB table is a synchronized full scan on both sides and only
 says "differ / match". The default `chunked` mode does one scan per side, buckets rows by a
 hash of their PK, compares N bucket checksums, and **drills only the mismatched buckets** to
 name the exact divergent rows:

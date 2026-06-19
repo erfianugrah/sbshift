@@ -6,7 +6,7 @@ description: Drive the user's `pgshift` CLI — a typed Bun/TypeScript orchestra
 # pgshift — Postgres→Postgres logical-replication migrator
 
 Typed CLI orchestrator for **near-zero-downtime PG→PG migration** built for the
-large-class case where a plain dump/restore window is unacceptable. The engine
+large-database case where a plain dump/restore window is unacceptable. The engine
 (`replicate → watch → reconcile → cutover → teardown`) is **generic Postgres**;
 when both ends are Supabase it *also* wraps the `supabase` CLI + Management API
 for the non-replicated pieces (schema, storage, functions, project config).
@@ -120,7 +120,7 @@ collides with a replicated row. `cutover` resyncs every owned sequence from the
 **Generated columns** (e.g. a STORED `tsvector`) are recomputed on the subscriber
 and **excluded from the reconcile hash** (hashing them = false mismatch). They are
 *not* free during copy — a heavy STORED gen-column is the CPU bottleneck
-(~7× slower copy measured in the large rehearsal). `watch` shows live copy %.
+(~7× slower copy measured in a large-scale rehearsal). `watch` shows live copy %.
 
 **Cross-region hash stability.** Row hashes render `row::text`, which depends on
 `TimeZone`/`DateStyle`/`IntervalStyle`/`extra_float_digits`/`bytea_output`. Every
@@ -208,7 +208,7 @@ src/mgmt.ts           Supabase Management API client
 src/steps/            doctor preflight replicate watch reconcile cutover teardown status run config-sync cli-wrappers checks
 src/rehearsal/        seed.ts (size-targeted seeding) + writer.ts (continuous write load + id ledger)
 test/                 *.test.ts (unit) + integration.test.ts + scale/live harnesses + annoying-schema.ts
-docs/RUNBOOK.md       the verified step-by-step (example-app); §9 cutover, §12 rollback
+docs/RUNBOOK.md       the step-by-step runbook; §9 cutover, §12 rollback
 ```
 
 ## Siblings

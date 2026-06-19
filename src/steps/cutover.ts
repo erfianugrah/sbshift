@@ -81,7 +81,7 @@ export async function cutover(
   //    sequence OWNED BY a column of a replicated table, read its final value on the
   //    (now write-stopped) source, and setval it on the target. Safe because writes
   //    are stopped and lag is drained, so source values are final. No-op for
-  //    uuid/text-PK schemas like Example-app (zero owned sequences).
+  //    uuid/text-PK schemas (zero owned sequences).
   const ownedSeqs = await source<{ seq: string }[]>`
     SELECT quote_ident(sn.nspname) || '.' || quote_ident(s.relname) AS seq
     FROM pg_class s

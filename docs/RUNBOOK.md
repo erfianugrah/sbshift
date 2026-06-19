@@ -1,8 +1,9 @@
-# Example-app cross-region migration — step-by-step runbook
+# Cross-region (and PG→PG) migration — step-by-step runbook
 
-This is the exact, no-guessing procedure to move the **example-app** Supabase project
-to a new region with minimal downtime. Every command below has been run/verified against
-the live source or the installed CLIs. Follow it top to bottom.
+A no-guessing procedure to move a Postgres database (Supabase→Supabase across regions, or any
+PG15+→PG15+ pair) with minimal downtime, using native logical replication. Follow it top to
+bottom. Substitute your own project refs / connection strings / table names where placeholders
+appear (`<...>`).
 
 If you only read one thing: **run `bun start doctor` at every gate and do not proceed past
 a `✗ NOT READY`.**
@@ -13,28 +14,28 @@ up before step 1.
 
 ---
 
-## 0. Verified facts about this migration (do not re-derive)
+## 0. Gather these facts about YOUR migration first (do not skip)
 
-| Fact | Value | Why it matters |
+Fill this table in before you touch anything. `doctor` verifies most of it, but knowing the
+answers up front is what makes the rest of the runbook mechanical.
+
+| Fact | How to find it | Why it matters |
 |---|---|---|
-| Source project | `example-app`, ref `REDACTED` | the FROM |
-| Source region | `eu-central-1` | the move is *away* from here |
-| Org | `ExampleOrg`, id `REDACTED` | target must be created here |
-| Postgres | 17.6, `wal_level=logical` | logical replication is available |
-| Data tables | `public.documents`, `public.aliases` | the only things this tool replicates |
-| Data size | ~6 documents, 0 aliases | copy is instant; this is a rehearsal of the big-DB procedure |
-| Generated col | `documents.search_vector` (tsvector) | excluded from the reconcile hash automatically |
-| **Cross-schema FK** | `public.documents.user_id → auth.users` (3 users) | **auth.users must exist on target BEFORE copy** |
-| Sequences (public) | none (uuid PKs) | no sequence resync at cutover |
-| Storage | 0 buckets, 0 objects | **skip the storage step entirely** |
-| Edge Functions | none (app runs on elsewhere) | **skip the functions step** (`functions.enabled: false`) |
-| Realtime publications on public tables | none (broadcast dropped in migration `REDACTED`) | nothing to re-enable for data tables |
-| Non-default extensions | `pg_cron`, `pgcrypto`, `uuid-ossp`, `pg_stat_statements`, `hypopg`, `index_advisor`, `supabase_vault` | must be enabled on target before schema load |
-| Custom LOGIN roles | none (only Supabase-managed roles) | no manual role-password resets needed |
+| Source project ref | dashboard / connection string | the FROM |
+| Source region | dashboard | the move is *away* from here |
+| Org id (Supabase) | `supabase orgs list` | the target is created here |
+| Postgres version + `wal_level` | `show server_version; show wal_level;` | logical replication needs `wal_level=logical` and target version ≥ source |
+| Data tables to replicate | your schema | the only thing this tool copies — enumerate them in config |
+| Generated columns | `\d+ <table>` | STORED generated columns are excluded from the reconcile hash automatically |
+| **Cross-schema FKs into `auth`** | inspect FKs | **referenced rows (e.g. `auth.users`) must exist on the target BEFORE the copy** or every child row is FK-rejected |
+| Owned sequences (serial/IDENTITY) | `\d <table>` | resynced at cutover; none needed for uuid/text PKs |
+| Storage buckets / objects | dashboard | replicated separately (`storage` step) or skipped if none |
+| Edge Functions | dashboard | transferred separately (`functions` step) or skipped if none |
+| Non-default extensions | `select * from pg_extension;` | must be enabled on the target before the schema load |
+| Custom LOGIN roles | `\du` | passwords are not dumped — reset them manually on the target if any |
 
-`SUPABASE_GO_BINARY` shim note: this machine needs
-`export SUPABASE_GO_BINARY="$HOME/.local/share/supabase/supabase-go"` before any
-`supabase` command, or the CLI can't find its Go binary.
+> If your `supabase` CLI can't find its Go binary, export `SUPABASE_GO_BINARY` to its path
+> before any `supabase` command.
 
 ---
 
@@ -45,57 +46,61 @@ Logical replication needs a **direct** connection on both ends:
 The **pooler** host (`...pooler.supabase.com`) **cannot stream replication** — it is only
 usable for read-only inspection and for `supabase db dump`.
 
-The direct host is **IPv6-only** unless the project has the IPv4 add-on. **This dev box has
-no IPv6 route**, so `replicate` / `watch` / `reconcile` **cannot run from here**. Pick one
-before you go further:
+The direct host is **IPv6-only** unless the project has the IPv4 add-on. **If the box you run
+from has no IPv6 route**, `replicate` / `watch` / `reconcile` cannot connect to the direct
+host from there. Pick one before you go further:
 
 - **Option A (recommended, $0):** run `pgshift` from an IPv6-capable host — e.g. a small
   VM in the target region. Clone the repo, `bun install`, copy `migrate.config.yaml` + `.env`.
 - **Option B (small cost):** enable the [IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address)
-  on the source (and target) for the migration window, then run from this box. Remove it after.
+  on the source (and target) for the migration window, then run from your box. Remove it after.
+- **Option C (split):** keep `SOURCE_DB_URL`/`TARGET_DB_URL` on the IPv4 **session pooler**
+  for admin/dump/reconcile and set **`SOURCE_REPLICATION_URL`** to the source *direct* host —
+  the subscription is dialed by the target's walreceiver over the provider's internal network.
+  `doctor` validates the split.
 
-The read-only prep in steps 2–3 and the dump/restore in step 6 work from **this box via the
-pooler** regardless of which option you choose.
+The read-only prep in steps 2–3 and the dump/restore in step 6 work via the **pooler**
+regardless of which option you choose.
 
 ---
 
-## 2. Prep state (already done — verify, don't redo)
+## 2. Stage config + env
 
 ```bash
-cd ~/pgshift
+cd <repo>
 bun install
-# migrate.config.yaml and .env are already staged (both gitignored).
-#   - migrate.config.yaml: source.ref = REDACTED, target.ref = PENDING…
-#   - .env: SOURCE_DB_URL = pooler (for doctor from here), TARGET_DB_URL = placeholder
+cp migrate.config.example.yaml migrate.config.yaml   # set source.ref + tables
+cp .env.example .env                                  # set SOURCE_DB_URL (and token if Supabase)
+# migrate.config.yaml and .env are gitignored.
 bun start doctor --source-only
 ```
 
-Expected: `READY (with warnings)`. The one warning is the `auth.users` cross-schema FK
-(addressed in step 6) plus the "pooler endpoint" note (expected from this box).
+Expected: `READY (with warnings)`. Typical warnings are the `auth.users` cross-schema FK
+(addressed in step 6) and a "pooler endpoint" note (expected until you run from a direct host).
 
 ---
 
 ## 3. Rehearse on throwaway Postgres first (optional but recommended, $0)
 
-Proves the replication + reconcile + fault-detection SQL end-to-end with no Supabase project:
+Proves the replication + reconcile + fault-detection SQL end-to-end with no managed project:
 
 ```bash
-bun run test:integration   # needs Docker; 7 tests, ~6s
+bun run test:integration   # needs Docker; ~6s
 ```
+
+For a scale rehearsal that emulates real on-disk size + live write load, see the README
+**Rehearsal** section (`bun start rehearse seed-size` / `rehearse writer` / `rehearse run`).
 
 ---
 
-## 4. Create the target project  ← THE ONLY BILLABLE STEP
+## 4. Create the target project  ← THE ONLY BILLABLE STEP (Supabase)
 
 ```bash
-export SUPABASE_GO_BINARY="$HOME/.local/share/supabase/supabase-go"
-
-# Pick the new region. Source is eu-central-1; e.g. ap-southeast-1 = Singapore.
-# Valid regions: ap-east-1 ap-northeast-1 ap-northeast-2 ap-south-1 ap-southeast-1
-#   ap-southeast-2 ca-central-1 eu-central-1 eu-central-2 eu-north-1 eu-west-1 eu-west-2
-#   eu-west-3 sa-east-1 us-east-1 us-east-2 us-west-1 us-west-2
-supabase projects create example-app-<region> \
-  --org-id REDACTED \
+# Pick the new region. Valid regions: ap-east-1 ap-northeast-1 ap-northeast-2 ap-south-1
+#   ap-southeast-1 ap-southeast-2 ca-central-1 eu-central-1 eu-central-2 eu-north-1
+#   eu-west-1 eu-west-2 eu-west-3 sa-east-1 us-east-1 us-east-2 us-west-1 us-west-2
+supabase projects create <project-name> \
+  --org-id <YOUR_ORG_ID> \
   --region <TARGET_REGION> \
   --db-password "$(openssl rand -base64 24)"   # SAVE THIS — you'll need it below
 ```
@@ -104,6 +109,9 @@ Note the new project **ref** it prints. From the dashboard **Connect** panel of 
 project, copy the **direct** connection string (`db.<newref>.supabase.co:5432`) and its
 **session-pooler** string (`...pooler.supabase.com:5432`) — you'll use the pooler for the
 restore and the direct one for replication.
+
+(For a self-hosted target, just provision the empty PG15+ instance and capture its direct
+connection string.)
 
 ---
 
@@ -118,21 +126,21 @@ target:
 
 Edit `.env` — set `TARGET_DB_URL` to the new project's **direct** string, and (only when you
 run replication from an IPv6 host or with the IPv4 add-on) switch `SOURCE_DB_URL` to the
-source **direct** string. From this box keep `SOURCE_DB_URL` on the pooler for the dump.
+source **direct** string. From a non-IPv6 box keep `SOURCE_DB_URL` on the pooler for the dump
+and use `SOURCE_REPLICATION_URL` (Option C above).
 
 ---
 
 ## 6. Restore everything the tool does NOT replicate — onto the target, in order
 
 Logical replication carries **table rows only** — no DDL, no roles, no `auth`/`storage`
-schemas. The FK `documents.user_id → auth.users` means the **3 auth users must exist on the
-target before the copy**, or every `documents` row is rejected. Connection here can be the
-**pooler** (read for dump, write for restore) — direct is not required for this step.
+schemas. Any FK from a replicated table into `auth.users` means the **referenced auth rows
+must exist on the target before the copy**, or every child row is rejected. Connection here
+can be the **pooler** (read for dump, write for restore) — direct is not required for this step.
 
 ```bash
-export SUPABASE_GO_BINARY="$HOME/.local/share/supabase/supabase-go"
-SRC="postgresql://postgres.REDACTED:<SRC_PW>@aws-1-eu-central-1.pooler.supabase.com:5432/postgres"
-TGT="postgresql://postgres.<NEW_TARGET_REF>:<TGT_PW>@<TGT_POOLER_HOST>:5432/postgres"
+SRC="<SOURCE_POOLER_OR_DIRECT_URL>"
+TGT="<TARGET_POOLER_URL>"
 
 # 6a. dump roles, schema (DDL+RLS+functions), and the auth-schema DATA from the source
 supabase db dump --db-url "$SRC" -f roles.sql  --role-only
@@ -140,9 +148,7 @@ supabase db dump --db-url "$SRC" -f schema.sql
 supabase db dump --db-url "$SRC" -f auth.sql   --data-only --schema auth --use-copy
 
 # 6b. enable non-default extensions on the target FIRST (dashboard → Database → Extensions,
-#     or SQL). `doctor` in step 7 will tell you exactly which are still missing; enable those.
-#     For example-app the set is: pg_cron pgcrypto uuid-ossp pg_stat_statements hypopg
-#     index_advisor supabase_vault  (several are enabled automatically by schema.sql).
+#     or SQL). `doctor` in step 7 lists exactly which are still missing — enable those.
 
 # 6c. restore roles → schema → auth data, with triggers disabled during the data load
 psql \
@@ -155,17 +161,20 @@ psql \
   --dbname "$TGT"
 ```
 
-If `psql` errors on `supabase_admin` ownership or the `cli_login_postgres` grant, see the
+If `psql` errors on `supabase_admin` ownership or a `cli_login_postgres` grant, see the
 "Troubleshooting" notes in the upstream guide
 (`/docs/supabase/guides/platform/migrating-within-supabase/backup-restore.md`) — comment out
 the offending `ALTER ... OWNER TO "supabase_admin"` / `GRANT "postgres" TO "cli_login_postgres"`
 line and re-run.
 
-`schema.sql` is the authoritative app-schema source here (full live DDL: tables, RLS,
-functions, the `pg_cron`/cleanup functions). It does **not** contain the `cron.schedule(...)`
-job row (that's data in the `cron` schema, not DDL), so the target won't run cleanup jobs
-while both DBs are live. You add that one schedule explicitly **after** cutover in step 9d.
-Do not apply the document-store migrations dir here — `schema.sql` already captures the live state.
+`schema.sql` is the authoritative app-schema source (full live DDL: tables, RLS, functions,
+any scheduled-job functions). It does **not** contain `cron.schedule(...)` job rows (that's
+data in the `cron` schema, not DDL), so the target won't run scheduled jobs while both DBs are
+live. Add any such schedule explicitly **after** cutover in step 9d. Prefer the dumped
+`schema.sql` over replaying a migrations directory — it already captures the live state.
+
+For a non-Supabase pair, replace the `supabase db dump` calls with ordinary
+`pg_dumpall --roles-only` + `pg_dump --schema-only`, and there is no `auth` schema to restore.
 
 ---
 
@@ -176,10 +185,10 @@ bun start doctor        # full: source + target
 bun start preflight
 ```
 
-`doctor` must end `READY` (warnings ok). It will confirm: target reachable, target version ≥
-source, target role can `CREATE SUBSCRIPTION`, **target has all source extensions**, **target
-tables `public.documents`/`public.aliases` exist (schema loaded)**, and that `auth.users` is no
-longer flagged as missing prerequisite data. **Stop if any `✗`.**
+`doctor` must end `READY` (warnings ok). It confirms: target reachable, target version ≥
+source, target role can `CREATE SUBSCRIPTION`, **target has all source extensions**, **your
+data tables exist on the target (schema loaded)**, and that no cross-schema FK is missing its
+prerequisite data. **Stop if any `✗`.**
 
 ---
 
@@ -188,7 +197,7 @@ longer flagged as missing prerequisite data. **Stop if any `✗`.**
 ```bash
 bun start replicate     # creates publication + slot on source, subscription on target
 bun start watch         # polls until all tables srsubstate='r'; aborts if WAL bloats past
-                        # watchdog.maxRetainedWalMb (2048) on the source
+                        # watchdog.maxRetainedWalMb (default 2048) on the source
 ```
 
 `replicate` is idempotent-ish: it skips objects that already exist. If you need to start
@@ -200,8 +209,8 @@ over, run `bun start teardown` first.
 
 ### Migration-day signals — success & abort thresholds
 
-Decide these BEFORE you stop writes. The tool owns the **data-plane** gates (left);
-your Grafana/observability stack owns the **app-tier** gates (right). Abort if either trips.
+Decide these BEFORE you stop writes. The tool owns the **data-plane** gates (left); your
+observability stack owns the **app-tier** gates (right). Abort if either trips.
 
 | Phase | Watch (data-plane, this tool) | Watch (app-tier, your dashboards) |
 |---|---|---|
@@ -216,7 +225,7 @@ your Grafana/observability stack owns the **app-tier** gates (right). Abort if e
 - `reconcile` reports any mismatch → do **not** complete cutover; investigate.
 - App-tier: sustained 5xx > Y for N min, or DB p95 > X for N min, after repoint → roll back (§12).
 
-Keep one Grafana view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `pgshift watch`/`status` output (or its `--log-file`).
+Keep one dashboard view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `pgshift watch`/`status` output (or its `--log-file`).
 
 ```bash
 # 9a. STOP application writes to the SOURCE (put the app in read-only / take it down).
@@ -230,11 +239,11 @@ bun start cutover                     # default waits up to 300s for lag to drai
 bun start reconcile                   # chunked checksum; must print RECONCILE PASSED
 #   (full-table variant: bun start reconcile --mode full)
 
-# 9d. now load the pg_cron schedule migration on the TARGET (the one skipped earlier):
-psql "$TARGET_DB_URL" -f path/to/supabase/migrations/REDACTED_scheduled_jobs.sql
+# 9d. load any deferred schedule/cron migration on the TARGET (the one skipped earlier):
+psql "$TARGET_DB_URL" -f <path/to/deferred_schedule_migration.sql>
 
-# 9e. repoint the app: set the Worker's SUPABASE_URL / SUPABASE_SECRET_KEY to the new
-#     project and redeploy. DNS/edge cutover as applicable.
+# 9e. repoint the app: set its database URL + keys to the new project and redeploy.
+#     DNS/edge cutover as applicable.
 ```
 
 **Never re-enable writes on the source after this point** — that causes split-brain. The
@@ -255,15 +264,14 @@ OAuth / JWT secrets on the target by hand in the dashboard. `config-sync` is a T
 has **not** been validated against the live Management API — always `--dry-run` and review
 the diff before applying.
 
-> **The new project has a new JWT secret + anon/service keys.** Every existing user JWT and
-> session is signed with the OLD secret, so all users (the 3 here) must **re-login** after
-> cutover. Update the app's `SUPABASE_URL` + `SUPABASE_SECRET_KEY` (the Worker secrets) to
-> the new project as part of step 9e.
+> **A new Supabase project has a new JWT secret + anon/service keys.** Every existing user JWT
+> and session is signed with the OLD secret, so all users must **re-login** after cutover.
+> Update the app's database URL + keys to the new project as part of step 9e.
 
-For example-app specifically:
-- **Storage** objects: none → skip (`supabase storage` step not needed).
-- **Edge Functions**: none → skip (`functions.enabled: false`).
-- **OAuth**: re-enter the OAuth client id/secret on the target's Auth providers.
+Storage objects and Edge Functions, if any, transfer separately:
+- **Storage:** `bun start storage <localDir>` (skip if no buckets).
+- **Edge Functions:** the `functions` step (skip / `functions.enabled: false` if none).
+- **OAuth providers:** re-enter each provider's client id/secret on the target's Auth settings.
 
 ---
 
@@ -318,7 +326,7 @@ because nothing replicates target → source. Your options, worst-case first:
 
 If the migration is high-stakes and you want Phase C to stay lossless during a validation
 window, establish target → source streaming **after** `reconcile` passes (9c) and **before**
-you repoint the app (9e). Use a second config with the roles swapped and **`copy_data: false`**
+you repoint the app (9e). Use a second config with the roles swapped and **`copyData: false`**
 (the data already matches — you only want new changes to stream back):
 
 ```bash
@@ -334,17 +342,17 @@ confident in the target, tear down the reverse path (§11 with the reverse confi
 project becomes a cold standby.
 
 > Reverse replication requires the source to still satisfy the same preflight gates (wal_level,
-> replica identity) it always had — it does. It is **not** bidirectional/active-active: only one
-> side ever takes application writes at a time. Its sole purpose is a clean escape hatch.
+> replica identity) it always had. It is **not** bidirectional/active-active: only one side
+> ever takes application writes at a time. Its sole purpose is a clean escape hatch.
 
 ---
 
 ## 13. Post-migration verification
 
 - `bun start reconcile` → `RECONCILE PASSED`.
-- App health: create a document, view it, confirm it persists on the new project.
-- Confirm `auth` login still works (the 3 migrated users) via OAuth.
-- Confirm pg_cron jobs are scheduled on the target (`select * from cron.job;`).
+- App health: exercise a representative write path and confirm it persists on the new project.
+- Confirm authentication still works (migrated users) if you use Supabase Auth.
+- Confirm any scheduled jobs (e.g. pg_cron) are present on the target (`select * from cron.job;`).
 - Leave the old project paused (not deleted) for a few days as a safety net.
 
 ---
@@ -360,11 +368,11 @@ project becomes a cold standby.
 | `bun start replicate` | publication + slot + subscription (starts initial copy) |
 | `bun start watch` | poll initial-sync state + WAL-bloat watchdog |
 | `bun start reconcile [--mode chunked\|full] [--buckets N] [--max-examples N]` | checksum source vs target |
-| `bun start cutover [--max-lag-wait SEC]` | drain lag to 0, drop subscription |
+| `bun start cutover [--max-lag-wait SEC]` | drain lag to 0, resync owned sequences, drop subscription |
 | `bun start teardown` | drop subscription/slot/publication safely (idempotent) |
 | `bun start config-sync [--dry-run]` | copy non-data config via Management API (secrets stripped) |
-| `bun start functions [--dry-run]` | transfer Edge Functions (N/A for example-app) |
-| `bun start storage <localDir> [--dry-run]` | push storage objects (N/A for example-app) |
+| `bun start functions [--dry-run]` | transfer Edge Functions (skip if none) |
+| `bun start storage <localDir> [--dry-run]` | push storage objects (skip if none) |
 | `bun start rehearse run --gib N --payload B [--chaos S --chaos-arg T]` | full scale rehearsal in-tool: seed-to-size → run → fault gate → teardown (THROWAWAY pair) |
 | `bun run test:integration` | live replication/reconcile against a throwaway Postgres pair |
 
