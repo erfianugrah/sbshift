@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -6,23 +6,25 @@ on:
   pull_request:
 
 jobs:
-  check:
+  test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
-
-      - name: Lint + format check
-        run: bunx biome ci .
+      - run: bun install --frozen-lockfile
 
       - name: Typecheck
         run: bun run typecheck
 
-      - name: Test
+      - name: Lint + format check
+        run: bun run lint
+
+      # Unit suite only. The live integration tier (test/integration.test.ts)
+      # self-skips without TEST_SOURCE_DB_URL / TEST_TARGET_DB_URL, so it is a
+      # no-op here; run it locally via `bun run test:integration` (needs Docker).
+      - name: Unit tests
         run: bun test

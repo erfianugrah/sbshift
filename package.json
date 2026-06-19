@@ -2,6 +2,8 @@
   "name": "supabase-region-migrate",
   "version": "0.1.0",
   "description": "Typed CLI orchestrator for cross-region Supabase project migration via logical replication.",
+  "license": "MIT",
+  "author": "Erfi Anugrah <erfi.anugrah@gmail.com>",
   "type": "module",
   "bin": {
     "sbmigrate": "./src/cli.ts"
