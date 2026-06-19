@@ -2,6 +2,8 @@ import { log } from "./log.ts";
 
 const API_BASE = "https://api.supabase.com/v1";
 
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 export class MgmtApi {
   constructor(private token: string) {}
 
@@ -34,6 +36,67 @@ export class MgmtApi {
       body: JSON.stringify(payload),
     });
     return { status: res.status, text: await res.text() };
+  }
+
+  /** POST /v1/projects — creates a new project; returns the project ref. */
+  async createProject(
+    name: string,
+    organizationId: string,
+    dbPass: string,
+    region: string,
+  ): Promise<string> {
+    const res = await fetch(`${API_BASE}/projects`, {
+      method: "POST",
+      headers: this.headers(true),
+      body: JSON.stringify({ name, organization_id: organizationId, db_pass: dbPass, region }),
+    });
+    if (!res.ok) throw new Error(`createProject failed: HTTP ${res.status} ${await res.text()}`);
+    const { ref } = (await res.json()) as { ref: string };
+    return ref;
+  }
+
+  /** GET /v1/projects/:ref — returns the raw project object (status, region, etc.). */
+  async getProject(ref: string): Promise<{ status: string; [k: string]: unknown }> {
+    const res = await fetch(`${API_BASE}/projects/${ref}`, { headers: this.headers() });
+    if (!res.ok) throw new Error(`getProject ${ref}: HTTP ${res.status}`);
+    return res.json() as Promise<{ status: string }>;
+  }
+
+  /** Poll until every ref reaches ACTIVE_HEALTHY (default 10 min). */
+  async waitHealthy(
+    refs: string[],
+    opts: { pollSec?: number; timeoutMin?: number } = {},
+  ): Promise<void> {
+    const { pollSec = 15, timeoutMin = 10 } = opts;
+    const deadline = Date.now() + timeoutMin * 60_000;
+    for (;;) {
+      const statuses = await Promise.all(refs.map((r) => this.getProject(r).then((p) => p.status)));
+      if (statuses.every((s) => s === "ACTIVE_HEALTHY")) return;
+      if (Date.now() >= deadline) throw new Error("timed out waiting for ACTIVE_HEALTHY");
+      log.detail(`waiting for ACTIVE_HEALTHY — ${statuses.join(", ")}`);
+      await sleep(pollSec * 1_000);
+    }
+  }
+
+  /** GET /v1/projects/:ref/config/database/pooler — returns session-pooler host+user. */
+  async getPooler(ref: string): Promise<{ host: string; user: string }> {
+    const { body } = await this.get<Array<{ db_host: string; db_user: string }>>(
+      ref,
+      "/config/database/pooler",
+    );
+    if (!body?.[0]) throw new Error(`No pooler config for project ${ref}`);
+    return { host: body[0].db_host, user: body[0].db_user };
+  }
+
+  /** DELETE /v1/projects/:ref — best-effort teardown; ignores 404. */
+  async deleteProject(ref: string): Promise<void> {
+    const res = await fetch(`${API_BASE}/projects/${ref}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+    if (!res.ok && res.status !== 404) {
+      log.warn(`deleteProject ${ref}: HTTP ${res.status} (ignored)`);
+    }
   }
 
   /** Sanity check: token valid and both refs visible to this account. */

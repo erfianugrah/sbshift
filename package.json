@@ -14,7 +14,8 @@
     "test:integration": "bash scripts/test-integration.sh",
     "typecheck": "tsc --noEmit",
     "check": "biome check --write .",
-    "lint": "biome check ."
+    "lint": "biome check .",
+    "test:live": "bun run scripts/live-supabase-test.ts"
   },
   "dependencies": {
     "commander": "^14.0.0",
