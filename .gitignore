@@ -9,3 +9,4 @@ ledger/
 dump/
 schema_dump/
 migrate.config.yaml
+logs/

@@ -68,9 +68,43 @@ export async function cutover(
     await sleep(2000);
   }
 
-  // 2. sequence re-sync (no-op for Example-app; present for the general case)
-  for (const seq of opts.sequences ?? []) {
-    log.warn(`sequence ${seq} must be resynced manually (setval) — generalised case only`);
+  // 2. sequence re-sync. Logical replication does NOT replicate sequence values,
+  //    so any serial/identity sequence on the target is stuck at its post-schema-load
+  //    value and the next insert would collide with a replicated row. Discover every
+  //    sequence OWNED BY a column of a replicated table, read its final value on the
+  //    (now write-stopped) source, and setval it on the target. Safe because writes
+  //    are stopped and lag is drained, so source values are final. No-op for
+  //    uuid/text-PK schemas like Example-app (zero owned sequences).
+  const ownedSeqs = await source<{ seq: string }[]>`
+    SELECT quote_ident(sn.nspname) || '.' || quote_ident(s.relname) AS seq
+    FROM pg_class s
+    JOIN pg_namespace sn ON sn.oid = s.relnamespace
+    JOIN pg_depend d ON d.objid = s.oid AND d.classid = 'pg_class'::regclass
+                    AND d.refclassid = 'pg_class'::regclass AND d.deptype IN ('a', 'i')
+    JOIN pg_class t ON t.oid = d.refobjid
+    JOIN pg_namespace tn ON tn.oid = t.relnamespace
+    WHERE s.relkind = 'S'
+      AND (tn.nspname || '.' || t.relname) = ANY(${cfg.replication.tables})`;
+  const seqs = [...new Set([...ownedSeqs.map((r) => r.seq), ...(opts.sequences ?? [])])];
+  if (seqs.length === 0) {
+    log.detail("no owned sequences among replicated tables — nothing to re-sync");
+  }
+  for (const seq of seqs) {
+    try {
+      const [sv] = await source<{ last_value: string; is_called: boolean }[]>`
+        SELECT last_value, is_called FROM ${source.unsafe(seq)}`;
+      if (!sv) {
+        log.warn(`sequence ${seq} not readable on source — resync it manually`);
+        continue;
+      }
+      await target.unsafe(`SELECT setval($1, $2, $3)`, [seq, sv.last_value, sv.is_called]);
+      log.ok(`sequence ${seq} set to ${sv.last_value} (is_called=${sv.is_called}) on target`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log.warn(
+        `sequence ${seq} resync failed (${msg}) — set it manually before re-enabling inserts`,
+      );
+    }
   }
 
   // 3. drop subscription

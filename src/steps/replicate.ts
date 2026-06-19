@@ -53,7 +53,19 @@ export async function replicate(
   // 3. subscription on target, bound to the pre-created slot
   const [existingSub] = await target`SELECT 1 FROM pg_subscription WHERE subname = ${subscription}`;
   if (existingSub) {
-    log.warn(`subscription ${subscription} already exists on target — leaving as-is`);
+    // Subscription already exists. If the publication's table list changed since it
+    // was created (e.g. you edited cfg.replication.tables and re-ran), the new tables
+    // are NOT picked up automatically — the subscription must REFRESH PUBLICATION,
+    // which starts an initial copy for the added tables (copy_data defaults true).
+    // Safe and idempotent: a no-op when nothing changed.
+    log.warn(`subscription ${subscription} already exists on target — refreshing publication`);
+    try {
+      await target.unsafe(`ALTER SUBSCRIPTION ${subscription} REFRESH PUBLICATION`);
+      log.ok(`refreshed subscription ${subscription} (picks up any newly published tables)`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log.warn(`REFRESH PUBLICATION failed (${msg}) — run watch to check sync state`);
+    }
     return;
   }
   const conn = sourceConnString(secrets).replaceAll("'", "''");

@@ -338,4 +338,31 @@ async function targetChecks(
           `target table ${qt} MISSING — load the schema on the target before replicate (DDL is not replicated)`,
         );
   }
+
+  // If the subscription already exists, every published table must appear in
+  // pg_subscription_rel — otherwise it was ADDed to the publication after the
+  // subscription was created and the subscriber never picked it up (its rows are
+  // silently NOT replicating). The fix is `replicate` again (REFRESH PUBLICATION).
+  const [subExists] = await target`
+    SELECT 1 FROM pg_subscription WHERE subname = ${cfg.replication.subscription}`;
+  if (subExists) {
+    const subRel = await target`
+      SELECT n.nspname || '.' || c.relname AS qt
+      FROM pg_subscription_rel sr
+      JOIN pg_subscription sub ON sub.oid = sr.srsubid
+      JOIN pg_class c ON c.oid = sr.srrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE sub.subname = ${cfg.replication.subscription}`;
+    const subbed = new Set(subRel.map((r) => String(r.qt)));
+    const notSubbed = cfg.replication.tables.filter((qt) => !subbed.has(qt));
+    notSubbed.length === 0
+      ? s.ok(
+          `subscription ${cfg.replication.subscription} covers all ${cfg.replication.tables.length} published tables`,
+        )
+      : s.fail(
+          `subscription ${cfg.replication.subscription} is NOT replicating: ${notSubbed.join(", ")} ` +
+            "— added to the publication after the subscription was created. Re-run `replicate` " +
+            "(it now issues REFRESH PUBLICATION) to start their initial copy.",
+        );
+  }
 }

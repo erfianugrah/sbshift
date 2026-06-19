@@ -1,7 +1,48 @@
 import postgres, { type Sql } from "postgres";
 import type { Secrets } from "./config.ts";
+import { log } from "./log.ts";
 
 export type Db = Sql;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Connection-shaped errors (network blip, server restart, idle drop) are worth
+// retrying; a SQL error (bad query, constraint) is NOT — it would just fail again.
+// Match on message OR SQLSTATE: 08xxx = connection exceptions, 57P0x = admin
+// shutdown / crash. Everything else propagates immediately.
+const TRANSIENT =
+  /econnreset|epipe|etimedout|enetunreach|ehostunreach|connection.*(clos|end|terminat|reset|timeout)|write CONNECTION|read CONNECTION|connect_timeout|CONNECTION_(CLOSED|ENDED|DESTROYED|CONNECT_TIMEOUT)/i;
+const TRANSIENT_SQLSTATE = /^(08\d\d\d|57P0[123])$/;
+
+export function isTransient(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  const code =
+    e && typeof e === "object" && "code" in e ? String((e as { code: unknown }).code) : "";
+  return TRANSIENT.test(msg) || TRANSIENT_SQLSTATE.test(code);
+}
+
+/**
+ * Run a query-producing fn, retrying ONLY transient connection errors with
+ * exponential backoff. For long phases (reconcile's multi-minute table scans,
+ * watch's hours-long poll) a single network blip should not abort the operation.
+ */
+export async function withRetry<T>(fn: () => Promise<T>, label: string, max = 4): Promise<T> {
+  let attempt = 0;
+  for (;;) {
+    try {
+      return await fn();
+    } catch (e) {
+      attempt++;
+      if (attempt >= max || !isTransient(e)) throw e;
+      const backoffMs = Math.min(1000 * 2 ** (attempt - 1), 8000);
+      const msg = e instanceof Error ? e.message : String(e);
+      log.warn(
+        `${label}: transient error (attempt ${attempt}/${max}), retrying in ${backoffMs}ms: ${msg}`,
+      );
+      await sleep(backoffMs);
+    }
+  }
+}
 
 /**
  * Create source + target clients. Logical replication setup needs a DIRECT

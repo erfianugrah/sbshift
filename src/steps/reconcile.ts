@@ -1,6 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
+import { withRetry } from "../db.ts";
 import { log } from "../log.ts";
 
 /**
@@ -179,8 +180,8 @@ async function reconcileFull(
   const q = `SELECT count(*)::bigint AS n,
                     coalesce(sum(hashtextextended(${rowExpr(cols)}, 0)), 0)::text AS h
              FROM ${ONLY(schema, table)}`;
-  const [s] = await source.unsafe(q);
-  const [tg] = await target.unsafe(q);
+  const [s] = await withRetry(() => source.unsafe(q), `reconcile/full ${schema}.${table} source`);
+  const [tg] = await withRetry(() => target.unsafe(q), `reconcile/full ${schema}.${table} target`);
   return {
     table: `${schema}.${table}`,
     mode: "full",
@@ -209,7 +210,10 @@ async function reconcileChunked(
                        coalesce(sum(hashtextextended(${rowExpr(cols)}, 0)), 0)::text AS h
                 FROM ${ONLY(schema, table)} GROUP BY 1`;
 
-  const [srcAgg, tgtAgg] = await Promise.all([source.unsafe(aggQ), target.unsafe(aggQ)]);
+  const [srcAgg, tgtAgg] = await Promise.all([
+    withRetry(() => source.unsafe(aggQ), `reconcile/agg ${schema}.${table} source`),
+    withRetry(() => target.unsafe(aggQ), `reconcile/agg ${schema}.${table} target`),
+  ]);
   const sMap = new Map<number, BucketRow>(
     srcAgg.map((r) => [Number(r.b), { b: Number(r.b), n: BigInt(r.n), h: String(r.h) }]),
   );
@@ -228,7 +232,10 @@ async function reconcileChunked(
     if (examples.length >= maxExamples) break;
     const drillQ = `SELECT ${rowExpr(keyCols)} AS pk, hashtextextended(${rowExpr(cols)}, 0)::text AS h
                     FROM ${ONLY(schema, table)} WHERE ${bucketExpr} = ${b}`;
-    const [sr, tr] = await Promise.all([source.unsafe(drillQ), target.unsafe(drillQ)]);
+    const [sr, tr] = await Promise.all([
+      withRetry(() => source.unsafe(drillQ), `reconcile/drill ${schema}.${table} b=${b} source`),
+      withRetry(() => target.unsafe(drillQ), `reconcile/drill ${schema}.${table} b=${b} target`),
+    ]);
     const sRows = new Map(sr.map((r) => [String(r.pk), String(r.h)]));
     const tRows = new Map(tr.map((r) => [String(r.pk), String(r.h)]));
     examples.push(...classifyRows(sRows, tRows, maxExamples - examples.length));

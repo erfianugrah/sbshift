@@ -33,7 +33,24 @@ program
     "Cross-region Supabase migration orchestrator (logical replication).\n" +
       "Step-by-step runbook: docs/RUNBOOK.md. Start with `sbmigrate doctor`.",
   )
-  .option("-c, --config <path>", "path to migrate.config.yaml", "migrate.config.yaml");
+  .option("-c, --config <path>", "path to migrate.config.yaml", "migrate.config.yaml")
+  .option(
+    "--log-file <path>",
+    "mirror all logs to this append-only file (default: logs/sbmigrate-<command>-<ts>.log)",
+  )
+  .option("--no-log-file", "disable the durable log file (terminal only)");
+
+// Open the durable log sink before any command runs, unless --no-log-file.
+// A migration spans hours; the terminal/SSH session dies but the file persists.
+program.hook("preAction", (thisCommand, actionCommand) => {
+  const opts = thisCommand.opts();
+  if (opts.logFile === false) return; // --no-log-file
+  const cmd = actionCommand.name();
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const path = typeof opts.logFile === "string" ? opts.logFile : `logs/sbmigrate-${cmd}-${ts}.log`;
+  const resolved = log.toFile(path);
+  log.detail(`logging to ${resolved}`);
+});
 
 /** Run a step that needs DB connections, ensuring clients are always closed. */
 async function withDb(
@@ -282,4 +299,4 @@ rehearse
     ),
   );
 
-program.parseAsync();
+program.parseAsync().finally(() => log.closeFile());
