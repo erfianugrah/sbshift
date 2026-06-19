@@ -296,9 +296,10 @@ bun start config-sync
 
 This copies Auth / Realtime / PostgREST / Storage / pooler settings via the Management API
 (needs `SUPABASE_ACCESS_TOKEN` in `.env`). By default **secrets are stripped** — re-enter SMTP /
-OAuth / JWT secrets on the target by hand in the dashboard. `config-sync` is a TS port that
-has **not** been validated against the live Management API — always `--dry-run` and review
-the diff before applying.
+OAuth / JWT secrets on the target by hand in the dashboard (or opt in below). `config-sync` is a
+TS port of `sync_supabase_config.sh`; its **read paths + `--dry-run` are validated read-only
+against the live Management API**, but the apply (write) path has not been exercised live — so
+always `--dry-run` and review the diff before applying.
 
 **Optional sections + secret copying** (all opt-in under `configSync` in the config):
 

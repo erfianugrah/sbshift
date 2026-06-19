@@ -242,7 +242,7 @@ src/cli.ts            commander entry, one subcommand per step
 src/config.ts         zod schema (YAML) + env secrets schema
 src/db.ts             source/target pg clients; qi() identifier quoting; conn-string builder
 src/mgmt.ts           Supabase Management API client
-src/steps/            doctor preflight replicate watch reconcile cutover teardown status run config-sync cli-wrappers checks
+src/steps/            doctor preflight replicate watch reconcile cutover teardown status run config-sync claim provision verify cli-wrappers checks
 src/rehearsal/        seed.ts (size-targeted seeding) + writer.ts (continuous write load + id ledger)
 test/                 *.test.ts (unit) + integration.test.ts + scale/live harnesses + annoying-schema.ts
 docs/RUNBOOK.md       the step-by-step runbook; §9 cutover, §12 rollback

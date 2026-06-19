@@ -256,9 +256,16 @@ bun start watch
 bun start cutover            # drains lag to 0, drops the subscription
 #    repoint your app to the target; add cron jobs on the target now.
 
-# 6. copy non-data config (secrets stripped — re-enter SMTP/OAuth/JWT by hand)
+# 6. copy non-data config via the Management API. Secrets are stripped by
+#    default; opt in (configSync.secrets / projectSecrets) to copy SMTP/OAuth/
+#    SMS/hook + Edge-Function creds. The JWT secret + API keys are NEVER copied.
 bun start config-sync --dry-run   # review the diff
 bun start config-sync
+#    (optional) match billable infra — compute/PITR/IPv4/disk/backup (opt-in):
+bun start provision               # preview; --confirm applies (CHANGES THE BILL)
+
+# 6b. post-migration health gate — fails on RLS/PK/advisor lints on the target
+bun start verify
 
 # 7. teardown replication objects
 bun start teardown
