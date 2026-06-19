@@ -299,13 +299,13 @@ rehearse
   .option("--interval <ms>", "ms between inserts", "50")
   .option("--duration <sec>", "stop after N seconds (default: run until Ctrl-C)")
   .action((o) =>
-    withDb(({ source }, _cfg) =>
-      writer(source, {
+    withDb(async ({ source }, _cfg) => {
+      await writer(source, {
         ledgerPath: o.ledger,
         intervalMs: Number(o.interval),
         durationSec: o.duration ? Number(o.duration) : undefined,
-      }),
-    ),
+      });
+    }),
   );
 
 program.parseAsync().finally(() => log.closeFile());

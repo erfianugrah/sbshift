@@ -23,7 +23,10 @@ describe("ConfigSchema", () => {
   });
 
   test("rejects a publication name that is not a bare identifier", () => {
-    const bad = { ...base, replication: { tables: ["public.documents"], publication: "drop;table" } };
+    const bad = {
+      ...base,
+      replication: { tables: ["public.documents"], publication: "drop;table" },
+    };
     expect(ConfigSchema.safeParse(bad).success).toBe(false);
   });
 
