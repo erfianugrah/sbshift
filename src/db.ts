@@ -12,7 +12,29 @@ export function connect(
   secrets: Secrets,
   opts: { connectTimeoutSec?: number } = {},
 ): { source: Db; target: Db; close: () => Promise<void> } {
-  const pgOpts = { max: 3, idle_timeout: 20, connect_timeout: opts.connectTimeoutSec ?? 30 };
+  const pgOpts = {
+    max: 3,
+    idle_timeout: 20,
+    connect_timeout: opts.connectTimeoutSec ?? 30,
+    // Canonical GUCs applied to EVERY connection in both pools. Two reasons:
+    //  1. Correctness: reconcile hashes `row::text`, whose rendering depends on
+    //     TimeZone / DateStyle / extra_float_digits / bytea_output / IntervalStyle.
+    //     Source and target are different projects (different regions) — if any of
+    //     these differ, identical data hashes differently => FALSE reconcile
+    //     mismatch. Pinning them identically on both sides makes the hash stable.
+    //  2. Resilience: a full-table hash scan over a large table runs for minutes;
+    //     Supabase sets a default statement_timeout that would kill it mid-scan.
+    connection: {
+      statement_timeout: 0,
+      idle_in_transaction_session_timeout: 0,
+      lock_timeout: 0,
+      TimeZone: "UTC",
+      DateStyle: "ISO, YMD",
+      IntervalStyle: "postgres",
+      extra_float_digits: "3",
+      bytea_output: "hex",
+    },
+  };
   const source = postgres(secrets.SOURCE_DB_URL, pgOpts);
   const target = postgres(secrets.TARGET_DB_URL, pgOpts);
   return {

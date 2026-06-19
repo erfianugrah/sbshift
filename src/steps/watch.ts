@@ -31,11 +31,25 @@ export async function watch(source: Db, target: Db, cfg: Config): Promise<void> 
   }
 
   for (;;) {
-    // WAL retained by the slot on the source (bytes)
+    // WAL retained by the slot on the source (bytes) + slot health
     const [walRow] = await source`
-      SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) AS retained_bytes, active
+      SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn) AS retained_bytes, active, wal_status
       FROM pg_replication_slots WHERE slot_name = ${slot}`;
     const retainedMb = Number(walRow?.retained_bytes ?? 0) / 1_048_576;
+
+    // A slot the server has invalidated (recycled WAL the subscriber hadn't read,
+    // i.e. max_slot_wal_keep_size exceeded) can never recover — replication is
+    // permanently broken and must be torn down + restarted. Fail loud, not silent.
+    if (walRow?.wal_status === "lost") {
+      throw new Error(
+        "replication slot INVALIDATED (wal_status=lost): the source recycled WAL the " +
+          "subscriber had not consumed. Replication cannot resume — teardown and restart " +
+          "the migration (and raise max_slot_wal_keep_size / speed up the subscriber).",
+      );
+    }
+    if (walRow && walRow.wal_status !== "reserved" && walRow.wal_status !== "extended") {
+      log.warn(`slot wal_status=${walRow.wal_status} — approaching invalidation`);
+    }
 
     // Per-table sync state on the subscriber. srsubstate: i=init d=copying r=ready s=synced
     const states = await target`

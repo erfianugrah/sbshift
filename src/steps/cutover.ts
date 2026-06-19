@@ -25,6 +25,33 @@ export async function cutover(
   const { subscription, slot } = cfg.replication;
   const deadline = Date.now() + (opts.maxLagWaitSec ?? 300) * 1000;
 
+  // 0. quiesce check: confirm the SOURCE is actually write-stopped before draining.
+  //    If WAL is still advancing AND client backends are running write queries,
+  //    writes are NOT stopped — draining to lag=0 is impossible and cutting over
+  //    now would lose post-cutover writes. Warn loudly (autovacuum etc. can move
+  //    WAL too, so this is a strong signal, not a hard stop).
+  const [r1] = await source<{ lsn: string }[]>`SELECT pg_current_wal_lsn()::text AS lsn`;
+  await sleep(1500);
+  const [r2] = await source<{ lsn: string }[]>`SELECT pg_current_wal_lsn()::text AS lsn`;
+  const lsn1 = r1?.lsn;
+  const lsn2 = r2?.lsn;
+  if (lsn1 !== lsn2) {
+    const [w] = await source`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE backend_type = 'client backend' AND state = 'active'
+        AND pid <> pg_backend_pid()
+        AND query !~* '^[[:space:]]*(select|copy|with|show|set|start_replication|fetch)'`;
+    const n = w?.n ?? 0;
+    log.warn(
+      `source WAL still advancing (${lsn1} -> ${lsn2}) with ${n} active write-shaped ` +
+        `client backend(s). Application writes do NOT appear stopped — draining to lag=0 ` +
+        `may never complete, and any writes after this point will be LOST at cutover. ` +
+        `Stop application writes to the source before proceeding.`,
+    );
+  } else {
+    log.ok("source WAL quiescent — writes appear stopped");
+  }
+
   // 1. drain lag
   for (;;) {
     const [row] = await source`
