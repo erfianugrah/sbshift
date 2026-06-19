@@ -1,10 +1,15 @@
+import { describe, expect, test } from "bun:test";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test } from "bun:test";
 import { ConfigSchema } from "../src/config.ts";
 import type { Db } from "../src/db.ts";
-import { type BucketRow, classifyRows, diffBuckets, reconcileLedger } from "../src/steps/reconcile.ts";
+import {
+  type BucketRow,
+  classifyRows,
+  diffBuckets,
+  reconcileLedger,
+} from "../src/steps/reconcile.ts";
 
 const mk = (entries: Array<[number, number, string]>): Map<number, BucketRow> =>
   new Map(entries.map(([b, n, h]) => [b, { b, n: BigInt(n), h }]));
@@ -111,7 +116,11 @@ describe("reconcileLedger", () => {
     const path = join(dir, "empty.log");
     writeFileSync(path, "");
     // A DB that throws if queried — should never be reached for an empty ledger.
-    const throwDb = { unsafe: () => { throw new Error("DB queried on empty ledger"); } } as unknown as Db;
+    const throwDb = {
+      unsafe: () => {
+        throw new Error("DB queried on empty ledger");
+      },
+    } as unknown as Db;
     expect(await reconcileLedger(throwDb, makeCfg(path))).toBe(true);
   });
 
@@ -134,7 +143,7 @@ describe("reconcileLedger", () => {
   test("batching: large ledger is split correctly (verify SQL called with slices)", async () => {
     const ids = Array.from({ length: 25_000 }, (_, i) => `id${i}`);
     const path = join(dir, "large.log");
-    writeFileSync(path, ids.join("\n") + "\n");
+    writeFileSync(path, `${ids.join("\n")}\n`);
     const calls: number[] = [];
     const mockDb = {
       unsafe: async (_sql: string, params: unknown[]) => {

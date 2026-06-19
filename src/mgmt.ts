@@ -74,9 +74,7 @@ export class MgmtApi {
       // during a 10-minute wait should not abort the entire harness.
       let statuses: string[];
       try {
-        statuses = await Promise.all(
-          refs.map((r) => this.getProject(r).then((p) => p.status)),
-        );
+        statuses = await Promise.all(refs.map((r) => this.getProject(r).then((p) => p.status)));
       } catch (e) {
         log.warn(
           `waitHealthy: transient error polling project status — ${

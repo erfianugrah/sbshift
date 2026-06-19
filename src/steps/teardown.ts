@@ -1,5 +1,6 @@
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
+import { qi } from "../db.ts";
 import { log } from "../log.ts";
 
 /**
@@ -14,9 +15,11 @@ export async function teardown(source: Db, target: Db, cfg: Config): Promise<voi
 
   const [sub] = await target`SELECT 1 FROM pg_subscription WHERE subname = ${subscription}`;
   if (sub) {
-    await target.unsafe(`ALTER SUBSCRIPTION ${subscription} DISABLE`);
-    await target.unsafe(`ALTER SUBSCRIPTION ${subscription} SET (slot_name = NONE)`);
-    await target.unsafe(`DROP SUBSCRIPTION ${subscription}`);
+    // H-4: quote identifiers (same fix as replicate.ts / cutover.ts) so a
+    // publication/subscription name with special chars tears down consistently.
+    await target.unsafe(`ALTER SUBSCRIPTION ${qi(subscription)} DISABLE`);
+    await target.unsafe(`ALTER SUBSCRIPTION ${qi(subscription)} SET (slot_name = NONE)`);
+    await target.unsafe(`DROP SUBSCRIPTION ${qi(subscription)}`);
     log.ok(`dropped subscription ${subscription}`);
   } else {
     log.detail(`no subscription ${subscription}`);
@@ -32,7 +35,7 @@ export async function teardown(source: Db, target: Db, cfg: Config): Promise<voi
 
   const [p] = await source`SELECT 1 FROM pg_publication WHERE pubname = ${publication}`;
   if (p) {
-    await source.unsafe(`DROP PUBLICATION ${publication}`);
+    await source.unsafe(`DROP PUBLICATION ${qi(publication)}`);
     log.ok(`dropped publication ${publication}`);
   } else {
     log.detail(`no publication ${publication}`);

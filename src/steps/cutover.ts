@@ -1,10 +1,9 @@
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
-import { withRetry } from "../db.ts";
+import { qi, withRetry } from "../db.ts";
 import { log } from "../log.ts";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const qi = (s: string) => `"${s.replace(/"/g, '""')}"`;
 
 /**
  * Final cutover. Caller MUST have already stopped application writes to the source.

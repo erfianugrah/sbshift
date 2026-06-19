@@ -78,7 +78,9 @@ async function main(): Promise<void> {
   const rows = Number(c?.n ?? 0);
   const mib = Number(c?.bytes ?? 0) / 1_048_576;
   const seedS = since(tSeed);
-  log.ok(`seeded ${rows.toLocaleString()} rows across 4 tables, ${mib.toFixed(0)} MiB in ${fmt(seedS)}`);
+  log.ok(
+    `seeded ${rows.toLocaleString()} rows across 4 tables, ${mib.toFixed(0)} MiB in ${fmt(seedS)}`,
+  );
 
   const tPre = performance.now();
   await preflight(source, target, cfg);
@@ -109,7 +111,9 @@ async function main(): Promise<void> {
   log.info(`seed               ${fmt(seedS)}  (${(rows / seedS).toFixed(0)} rows/s)`);
   log.info(`preflight          ${fmt(preS)}`);
   log.info(`replicate setup    ${fmt(repS)}`);
-  log.info(`initial copy       ${fmt(watchS)}  (${(mib / watchS).toFixed(1)} MiB/s, ${(rows / watchS).toFixed(0)} rows/s)`);
+  log.info(
+    `initial copy       ${fmt(watchS)}  (${(mib / watchS).toFixed(1)} MiB/s, ${(rows / watchS).toFixed(0)} rows/s)`,
+  );
   log.info(`reconcile          ${fmt(recS)}  -> ${ok ? "PASSED" : "FAILED"}`);
   log.info(`cutover            ${fmt(cutS)}`);
   log.info(`total e2e          ${fmt(seedS + preS + repS + watchS + recS + cutS)}`);

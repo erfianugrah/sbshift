@@ -23,14 +23,18 @@ describe("StatusSnapshot shape", () => {
   });
 
   test("allReady is false when ready < total", () => {
-    const s = makeSnap({ tables: { total: 4, ready: 2, init: 1, copying: 1, synced: 0, allReady: false } });
+    const s = makeSnap({
+      tables: { total: 4, ready: 2, init: 1, copying: 1, synced: 0, allReady: false },
+    });
     expect(s.tables.allReady).toBe(false);
   });
 
   test("L-6: lagBytes is non-negative in snapshot", () => {
     // The status() function clamps lagBytes to Math.max(0, ...).
     // This test documents the invariant: callers can assume lagBytes >= 0.
-    const s = makeSnap({ slot: { name: "s", exists: true, active: true, walRetainedMb: 0, lagBytes: 0 } });
+    const s = makeSnap({
+      slot: { name: "s", exists: true, active: true, walRetainedMb: 0, lagBytes: 0 },
+    });
     expect(s.slot.lagBytes).toBeGreaterThanOrEqual(0);
   });
 });

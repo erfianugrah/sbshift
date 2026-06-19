@@ -16,7 +16,9 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
   log.detail(`source PG ${srcNum} / target PG ${tgtNum}`);
   // M-8: raise floor to PG15; pg_stat_subscription_stats (used in watch) is PG15+
   if (srcNum < 150_000) {
-    log.err("source is < PG15 — logical replication is available from PG10 but this tool requires PG15+ (pg_stat_subscription_stats, pg_stat_progress_copy)");
+    log.err(
+      "source is < PG15 — logical replication is available from PG10 but this tool requires PG15+ (pg_stat_subscription_stats, pg_stat_progress_copy)",
+    );
     hardFail = true;
   }
   if (tgtNum < 150_000) {

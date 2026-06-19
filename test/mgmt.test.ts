@@ -128,9 +128,9 @@ describe("MgmtApi.waitHealthy — L-3 transient-error tolerance", () => {
   test("throws when deadline expires", async () => {
     mockFetch([{ status: 200, body: { status: "COMING_UP" } }]);
     const api = new MgmtApi(TOKEN);
-    await expect(
-      api.waitHealthy(["r1"], { pollSec: 0, timeoutMin: 0.001 }),
-    ).rejects.toThrow("timed out");
+    await expect(api.waitHealthy(["r1"], { pollSec: 0, timeoutMin: 0.001 })).rejects.toThrow(
+      "timed out",
+    );
   });
 });
 

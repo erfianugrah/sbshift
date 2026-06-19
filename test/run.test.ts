@@ -53,9 +53,9 @@ describe("run: confirmWritesStopped guard", () => {
   });
 
   test("through=cutover without confirmWritesStopped throws before any DB call", async () => {
-    await expect(
-      run(dummy, dummy, cfg, secrets, { through: "cutover" }),
-    ).rejects.toThrow("confirmWritesStopped");
+    await expect(run(dummy, dummy, cfg, secrets, { through: "cutover" })).rejects.toThrow(
+      "confirmWritesStopped",
+    );
   });
 
   test("through=cutover with confirmWritesStopped passes the guard and proceeds to preflight", async () => {

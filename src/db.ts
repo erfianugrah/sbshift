@@ -4,6 +4,14 @@ import { log } from "./log.ts";
 
 export type Db = Sql;
 
+/**
+ * Quote a SQL identifier for safe interpolation into `.unsafe()` DDL.
+ * Postgres folds unquoted identifiers to lowercase and rejects ones with
+ * hyphens / reserved words, so any identifier coming from user config
+ * (publication / slot / subscription / table names) must be quoted.
+ */
+export const qi = (s: string) => `"${s.replace(/"/g, '""')}"`;
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Connection-shaped errors (network blip, server restart, idle drop) are worth

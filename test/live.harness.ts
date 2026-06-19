@@ -136,7 +136,9 @@ async function main(): Promise<void> {
       const newId = Number(row?.id);
       const expected = ROWS + 1;
       if (newId === expected) {
-        log.ok(`new document id=${newId} (expected ${expected}) ✓ sequence resync prevented collision`);
+        log.ok(
+          `new document id=${newId} (expected ${expected}) ✓ sequence resync prevented collision`,
+        );
       } else {
         throw new Error(
           `sequence collision: got id=${newId} but expected ${expected} — resync failed`,

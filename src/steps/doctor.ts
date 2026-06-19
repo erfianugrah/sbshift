@@ -350,7 +350,9 @@ async function targetChecks(
       WHERE n.nspname = ${schema ?? ""} AND c.relname = ${table ?? ""}
         AND c.relkind IN ('r','p')`;
     if (!row) {
-      s.fail(`target table ${qt} MISSING — load the schema on the target before replicate (DDL is not replicated)`);
+      s.fail(
+        `target table ${qt} MISSING — load the schema on the target before replicate (DDL is not replicated)`,
+      );
     } else if (row.relkind === "p") {
       s.warn(
         `${qt} is a PARTITIONED TABLE — reconcile scans ONLY the parent partition root and ` +

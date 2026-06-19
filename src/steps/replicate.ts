@@ -1,11 +1,10 @@
 import type { Config, Secrets } from "../config.ts";
 import type { Db } from "../db.ts";
-import { sourceConnUrl } from "../db.ts";
+import { qi, sourceConnUrl } from "../db.ts";
 import { log } from "../log.ts";
 
 // H-4: quote every identifier that comes from user config so names with hyphens,
 // uppercase letters, or reserved words don't produce invalid SQL.
-const qi = (s: string) => `"${s.replace(/"/g, '""')}"`;
 // Qualified table name — schema and table quoted separately.
 const qt = (schemaTable: string) => {
   const [s, t] = schemaTable.split(".");

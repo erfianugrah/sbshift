@@ -106,9 +106,7 @@ export const SCENARIOS: Record<ScenarioName, Scenario> = {
         "target default_text_search_config = simple — reconcile should STILL pass (search_vector excluded)",
       );
       try {
-        await target.unsafe(
-          `ALTER DATABASE postgres RESET default_text_search_config`,
-        );
+        await target.unsafe(`ALTER DATABASE postgres RESET default_text_search_config`);
         log.detail("target default_text_search_config reset to cluster default");
       } catch (e) {
         log.warn(

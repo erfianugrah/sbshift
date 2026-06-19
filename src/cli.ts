@@ -193,7 +193,9 @@ program
     api
       .assertAccess([cfg.source.ref, cfg.target.ref])
       .then(() => configSync(api, cfg, { dryRun: Boolean(o.dryRun) }))
-      .then((r) => { if (r.err > 0) process.exitCode = 1; })
+      .then((r) => {
+        if (r.err > 0) process.exitCode = 1;
+      })
       .catch((e) => {
         log.err(e instanceof Error ? e.message : String(e));
         process.exitCode = 1;
