@@ -43,7 +43,8 @@ not the full procedure.
 ```
 doctor      readiness checklist (pooler-vs-direct, IPv6, wal_level, replica
             identity, subscribe grant, schema loaded, extension diff, auth.users
-            FK trap). --source-only when target not created yet. Fail-closed.
+            FK trap, custom pg_db_role_setting GUC overrides config-sync can't
+            carry). --source-only when target not created yet. Fail-closed.
   ↓
 [ pre-step, NOT automated — do this FIRST, see below ]
   ↓
@@ -139,8 +140,35 @@ rolling back loses every write the target took. RUNBOOK §12 has the per-phase t
 
 **Supabase identity churn.** A new project = new JWT secret + API keys → existing
 user sessions invalidate and the app's `SUPABASE_URL` + anon/service keys change.
-`config-sync` copies settings but **never secrets** — re-enter SMTP/OAuth/JWT by
-hand. Always `config-sync --dry-run` first.
+`config-sync` copies settings; secrets are stripped by default. Auth integration
+creds (SMTP/OAuth/SMS/hooks) + Edge-Function secrets are opt-in (`configSync.secrets`
+/ `configSync.projectSecrets`); the JWT signing secret + API keys are **never** copied
+(not on any synced endpoint). Optional opt-in sections: `sslEnforcement`,
+`networkRestrictions`, `thirdPartyAuth` (Firebase/Auth0/Cognito JWT integrations) and
+`ssoProviders` (SAML — additive, needs SAML 2.0 on the target plan); the last two are the
+auth sub-resources the `/config/auth` blob does NOT carry. Org settings + members/roles are
+read-only in the API → not migratable (re-invite by hand). Always `config-sync --dry-run` first.
+
+**"Invisible" custom Postgres config.** config-sync's `dbPostgres` only carries the GUCs
+Supabase exposes on `/config/database/postgres`. `ALTER ROLE/DATABASE ... SET` overrides
+(statement_timeout, auto_explain.*, pg_stat_statements.*, pgaudit.*, …) live in
+`pg_db_role_setting` and config-sync can't see them. `doctor` reads it on both ends and warns
+about source overrides missing/differing on target; compute-tuned ones (shared_buffers,
+work_mem, max_connections) are flagged `[compute-tuned]` — review, don't blindly copy. Re-apply
+by hand (or via `supabase postgres-config` for CLI-only system params).
+
+**Sibling Management-API commands:** `verify` (post-migration advisor health gate;
+`--fail-on error|warn|info`; fails closed if advisors unreachable), `provision [--confirm]`
+(copy billable infra: compute size / PITR / IPv4 / disk / backup schedule; preview-by-default,
+opt-in per `provision.*` flag, adds/upgrades to match source but never strips), and `claim
+<org-slug> <token> [--confirm]` (move a project into another org via claim token; preview-gates
+by default, warns on plan downgrade).
+
+**Can't be migrated (no write path / by design):** JWT signing secret + API keys (new project =
+new keys), org settings + members/roles + entitlements (read-only API), custom domain / vanity
+subdomain (DNS-coupled), pgsodium root key (decrypt-everything footgun), read replicas (no
+enumerate API — recreate post-cutover), CLI-only system GUCs (`shared_buffers` via `supabase
+postgres-config`).
 
 **Wrong-tool condition:** a **paused** source (especially > 90 days, no longer
 restorable via Studio) can't stream WAL — use Supabase's offline backup-download +

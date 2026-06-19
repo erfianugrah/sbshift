@@ -28,8 +28,14 @@ fills the data-movement gap and reminds you of the rest:
 | Sequences | `pg_dump --data-only --table='*_seq'` | `cutover` reminds you (N/A for uuid PKs) |
 | Storage objects | `supabase storage cp` | `storage` wrapper |
 | Edge Functions | `supabase functions download/deploy` | `functions` wrapper |
-| Project config (Auth/Realtime/…) | Management API | **`config-sync`** (TS port, secrets stripped) |
-| Secrets (SMTP/OAuth/JWT/…) | nothing — manual by design | flagged, never copied |
+| Project config (Auth/Realtime/…) | Management API | **`config-sync`** (TS port; +SSL, network-restrictions opt-in) |
+| Integration secrets (SMTP/OAuth/SMS/hooks, Edge-Function env) | Management API | `config-sync` opt-in (`secrets` / `projectSecrets`) |
+| JWT signing secret / API keys | nothing — new project = new keys | never copied (not on any synced endpoint) |
+| Org settings / members / roles | nothing — read-only in the API | not migratable; re-invite the team by hand |
+| Post-migration health gate | Management API advisors | **`verify`** (fails on RLS/PK/etc. lints) |
+| Compute size / PITR / IPv4 / disk / backup schedule | Management API (billable) | **`provision`** (preview + gate; `--confirm` to apply) |
+| Move project to another org | Management API claim token | **`claim`** (preview + gate; `--confirm` to move) |
+| Custom domain / pgsodium key / read replicas | — | not automated (DNS-coupled / footgun / no enumerate API) — by hand |
 
 ## When this tool does NOT apply
 
@@ -125,6 +131,11 @@ psql --single-transaction --variable ON_ERROR_STOP=1 \
 Also enable any **non-default extensions** on the target first — `doctor` diffs source vs
 target extensions and lists the missing ones.
 
+> For the **complete, consolidated scope** — every artifact across Supabase's three official
+> migration guides + the Management-API surface, what carries it, and which pgshift command (or
+> manual step) owns it — see **[`docs/MIGRATION-SCOPE.md`](docs/MIGRATION-SCOPE.md)**. It is the
+> exhaustive answer to "what are the *some things* not stored in my database?".
+
 ## What's baked in (so you don't relearn it at 2am)
 
 The reason to use this over hand-rolled SQL: the failure modes below are already handled. Each
@@ -201,8 +212,11 @@ is grouped by the command that owns it.
   app-tier gates (5xx, p95, connection saturation). `docs/RUNBOOK.md` §9 maps both.
 - **New project = new JWT secret + API keys** → existing user sessions/JWTs invalidate (users
   re-login) and the app's `SUPABASE_URL` + anon/service keys change. `config-sync` copies
-  settings but **never secrets** — re-enter them by hand, and always `--dry-run` first to
-  confirm the API shapes before applying.
+  settings; by default it strips secrets. Auth **integration** secrets (SMTP/OAuth/SMS/hooks)
+  and project/Edge-Function secrets can be copied opt-in (`configSync.secrets` /
+  `configSync.projectSecrets`), but the **JWT signing secret + API keys are never copied** —
+  they live on endpoints this tool doesn't call. Always `--dry-run` first to confirm the API
+  shapes before applying.
 
 ## Runbook
 
@@ -479,11 +493,16 @@ src/
     cutover.ts        lag drain + sequence resync + drop subscription
     teardown.ts       safe ordered cleanup
     status.ts         one-shot replication snapshot (for scheduled watchers)
-    config-sync.ts    Management API config copy (secrets stripped)
+    config-sync.ts    Management API config copy (auth/realtime/postgrest/storage/pooler
+                      /postgres + ssl-enforcement/network-restrictions/secrets opt-in)
+    provision.ts      billable infra copy (compute/disk/pitr/ipv4/backup-schedule; confirm-gated)
+    verify.ts         post-migration advisor health gate
+    claim.ts          org-level project-claim (move project to another org)
     cli-wrappers.ts   supabase functions/storage wrappers
   rehearsal/
     seed.ts           seed source data (far-future expiry)
     writer.ts         continuous write load + id ledger
 test/                 *.test.ts (unit) + integration.test.ts + scale/live harnesses + annoying-schema.ts
 docs/RUNBOOK.md       the step-by-step runbook; §9 cutover, §12 rollback
+docs/MIGRATION-SCOPE.md  exhaustive what-migrates/what-doesn't (consolidates the 3 guides)
 ```

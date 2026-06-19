@@ -8,6 +8,10 @@ appear (`<...>`).
 If you only read one thing: **run `bun start doctor` at every gate and do not proceed past
 a `✗ NOT READY`.**
 
+For the **exhaustive list of what does and does not migrate** (consolidating Supabase's three
+official guides + the Management-API surface), see **[`docs/MIGRATION-SCOPE.md`](MIGRATION-SCOPE.md)**
+— it answers "what are the *some things* not stored in my database?" completely.
+
 Prerequisites (Bun, the `supabase` CLI, `psql`/`pg_dump`, Docker for the rehearsal) and
 install steps are in the README **Prerequisites** + **Getting started** sections — set those
 up before step 1.
@@ -291,10 +295,65 @@ bun start config-sync
 ```
 
 This copies Auth / Realtime / PostgREST / Storage / pooler settings via the Management API
-(needs `SUPABASE_ACCESS_TOKEN` in `.env`). **Secrets are never copied** — re-enter SMTP /
+(needs `SUPABASE_ACCESS_TOKEN` in `.env`). By default **secrets are stripped** — re-enter SMTP /
 OAuth / JWT secrets on the target by hand in the dashboard. `config-sync` is a TS port that
 has **not** been validated against the live Management API — always `--dry-run` and review
 the diff before applying.
+
+**Optional sections + secret copying** (all opt-in under `configSync` in the config):
+
+| Flag | Effect |
+|---|---|
+| `sslEnforcement: true` | copy DB SSL enforcement (GET → PUT `/ssl-enforcement`) |
+| `networkRestrictions: true` | copy allowed-CIDR network restrictions (skips if source has none — never opens an empty allow-list) |
+| `secrets: true` | copy auth **integration** creds (SMTP/OAuth/SMS/hook secrets) instead of stripping them |
+| `projectSecrets: true` | copy project / Edge-Function secrets via the bulk `/secrets` endpoint (plaintext; `--dry-run` redacts values) |
+| `thirdPartyAuth: true` | recreate third-party-auth integrations (Firebase/Auth0/Cognito/Clerk JWT) on the target (additive) |
+| `ssoProviders: true` | recreate SSO/SAML providers on the target (additive; needs SAML 2.0 enabled on the target plan) |
+
+Even with `secrets: true`, the **JWT signing secret + API keys are never copied** — they live on
+separate endpoints this tool does not call, so a new project always gets new signing material.
+### 10b. (Optional) Match billable infra — `provision`
+
+Compute size, PITR/IPv4 addons, disk, and backup schedule are **billable**, so they live behind a
+separate confirm-gated command rather than `config-sync`:
+
+```bash
+bun start provision            # preview: shows source → target diff + price, applies NOTHING
+bun start provision --confirm  # applies — CHANGES THE TARGET'S BILL
+```
+
+Each area is opt-in under `provision` in the config (`compute`, `pitr`, `ipv4`, `disk`,
+`backupSchedule` — all default `false`). `provision` only **adds/upgrades** the target to match
+the source; it never strips addons the target already has. Gotchas:
+
+- **Compute size is the migration-critical one** — if you don't match it, the target may be
+  under-provisioned for the load you're cutting over. But matching a large source onto a fresh
+  target starts billing immediately.
+- **Custom Postgres config interacts with compute** (consideration #2 in the Supabase docs): if you
+  copied compute-tuned GUCs (`shared_buffers` et al.), re-check them after a compute change.
+- **Backup schedule needs the Enterprise plan** — `provision` skips it gracefully on lower plans.
+- **Disk size only grows** in practice; shrinking is not supported by the platform.
+
+Deferred / NOT automated (do by hand — see “What can't be migrated” below): custom domain & vanity
+subdomain (DNS-coupled), `pgsodium` root key, read replicas, the `auth_mfa_phone` addon.
+
+### What can't be migrated (no write path / by design)
+
+The full not-migratable list (JWT/API keys, org settings/members/roles, entitlements, custom
+domain, pgsodium key, read replicas, CLI-only GUCs) lives in the canonical scope reference —
+**[`docs/MIGRATION-SCOPE.md` §C/§D](MIGRATION-SCOPE.md)**. The operationally-important callouts:
+
+> **"Invisible" custom Postgres config.** The Management-API `dbPostgres` section only carries
+> the GUCs Supabase exposes on `/config/database/postgres`. Settings applied directly in SQL via
+> `ALTER ROLE ... SET` / `ALTER DATABASE ... SET` (e.g. `statement_timeout`, `auto_explain.*`,
+> `pg_stat_statements.*`, `pgaudit.*`, `session_replication_role`) live in `pg_db_role_setting`
+> and **config-sync cannot see them**. `doctor` reads `pg_db_role_setting` on both ends and warns
+> about source overrides missing/differing on the target so you can re-apply them by hand. It does
+> **not** auto-copy: compute-tuned values (`shared_buffers`, `work_mem`, `max_connections`, …) are
+> flagged `[compute-tuned]` because copying them onto a smaller target causes instability — review
+> before re-applying. CLI-only system overrides (`shared_buffers` et al. via `supabase
+> postgres-config`) are likewise not synced; re-set them on the target if the source customised them.
 
 > **A new Supabase project has a new JWT secret + anon/service keys.** Every existing user JWT
 > and session is signed with the OLD secret, so all users must **re-login** after cutover.
@@ -304,6 +363,25 @@ Storage objects and Edge Functions, if any, transfer separately:
 - **Storage:** `bun start storage <localDir>` (skip if no buckets).
 - **Edge Functions:** the `functions` step (skip / `functions.enabled: false` if none).
 - **OAuth providers:** re-enter each provider's client id/secret on the target's Auth settings.
+
+### Org-level data is NOT migratable
+
+Org settings, **members/roles**, and entitlements are read-only in the Management API — re-invite
+the team by hand. Details in [`docs/MIGRATION-SCOPE.md` §D](MIGRATION-SCOPE.md). The only org-level
+*action* is **claiming a project into a different org** (step 10a) — use it when the goal is "same
+project, different org" rather than the new-project + replication path.
+
+### 10a. (Optional) Claim a project into another org
+
+```bash
+bun start claim <org-slug> <claim-token>            # preview + gate only
+bun start claim <org-slug> <claim-token> --confirm  # actually move it
+```
+
+Preview is the default: it fetches the claim token's preview, **fails closed** on API errors /
+`valid=false` / an expired token, and warns (without blocking) on a plan **downgrade** or members
+exceeding the target org's free-tier project limit. `--confirm` performs the `POST`. Generate the
+claim token from the source project's dashboard. Members do **not** transfer either way.
 
 ---
 
@@ -395,7 +473,7 @@ project becomes a cold standby.
 |---|---|
 | `bun start run [--through P] [--json] [--confirm-writes-stopped]` | autonomous pipeline (preflight→replicate→watch→reconcile[→cutover]); exit 0 iff the requested range passed. For CI/Lambda. |
 | `bun start status [--json] [--require-synced]` | one-shot replication snapshot (sub state, srsubstate, slot active, WAL retained, lag) for a scheduled watcher |
-| `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded) |
+| `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded, custom `pg_db_role_setting` GUC overrides) |
 | `bun start preflight` | read-only hard-gate checks; throws on failure |
 | `bun start replicate` | publication + slot + subscription (starts initial copy) |
 | `bun start watch` | poll initial-sync state + WAL-bloat watchdog |
@@ -403,6 +481,9 @@ project becomes a cold standby.
 | `bun start cutover [--max-lag-wait SEC]` | drain lag to 0, resync owned sequences, drop subscription |
 | `bun start teardown` | drop subscription/slot/publication safely (idempotent) |
 | `bun start config-sync [--dry-run]` | copy non-data config via Management API (secrets stripped) |
+| `bun start verify [--fail-on error\|warn\|info]` | post-migration health gate: run Supabase advisors on the target, fail on lints |
+| `bun start provision [--confirm]` | copy billable infra (compute size, PITR/IPv4, disk, backup schedule); preview unless `--confirm` |
+| `bun start claim <org-slug> <token> [--confirm]` | org-level: move a project into another org (preview unless `--confirm`) |
 | `bun start functions [--dry-run]` | transfer Edge Functions (skip if none) |
 | `bun start storage <localDir> [--dry-run]` | push storage objects (skip if none) |
 | `bun start rehearse run --gib N --payload B [--chaos S --chaos-arg T]` | full scale rehearsal in-tool: seed-to-size → run → fault gate → teardown (THROWAWAY pair) |
