@@ -9,16 +9,19 @@ import { runChaos, SCENARIOS, type ScenarioName } from "./rehearsal/chaos.ts";
 import { rehearseRun } from "./rehearsal/orchestrate.ts";
 import { seed, seedToSize } from "./rehearsal/seed.ts";
 import { writer } from "./rehearsal/writer.ts";
+import { claim } from "./steps/claim.ts";
 import { transferFunctions, transferStorage } from "./steps/cli-wrappers.ts";
 import { configSync } from "./steps/config-sync.ts";
 import { cutover } from "./steps/cutover.ts";
 import { doctor } from "./steps/doctor.ts";
 import { preflight } from "./steps/preflight.ts";
+import { provision } from "./steps/provision.ts";
 import { reconcile } from "./steps/reconcile.ts";
 import { replicate } from "./steps/replicate.ts";
 import { PHASES, type Phase, run } from "./steps/run.ts";
 import { printStatus, status } from "./steps/status.ts";
 import { teardown } from "./steps/teardown.ts";
+import { type FailOn, verify } from "./steps/verify.ts";
 import { watch } from "./steps/watch.ts";
 
 const { version } = JSON.parse(
@@ -203,6 +206,78 @@ program
   });
 
 program
+  .command("verify")
+  .description("post-migration health gate: run Supabase advisors on the TARGET, fail on lints")
+  .option("--fail-on <level>", "gate threshold: error | warn | info", "error")
+  .option("--out-dir <path>", "directory for the verify JSON report", "ledger")
+  .option("--json", "emit a single JSON result object on stdout", false)
+  .action((o) => {
+    const failOn = String(o.failOn).toLowerCase();
+    if (!["error", "warn", "info"].includes(failOn)) {
+      log.err(`unknown --fail-on '${o.failOn}' (valid: error, warn, info)`);
+      process.exitCode = 1;
+      return;
+    }
+    if (o.json) log.toStderr();
+    const cfg = loadConfig(program.opts().config);
+    const secrets = loadSecrets(true);
+    const api = new MgmtApi(secrets.SUPABASE_ACCESS_TOKEN as string);
+    api
+      .assertAccess([cfg.target.ref])
+      .then(() =>
+        verify(api, cfg, { failOn: failOn as FailOn, outDir: o.outDir, json: Boolean(o.json) }),
+      )
+      .then((r) => {
+        if (!r.ok) process.exitCode = 1;
+      })
+      .catch((e) => {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      });
+  });
+
+program
+  .command("provision")
+  .description(
+    "copy billable infra (compute size, PITR/IPv4, disk, backup schedule) to the target (preview unless --confirm)",
+  )
+  .option("--confirm", "actually apply (changes the target's BILL); default: preview only", false)
+  .action((o) => {
+    const cfg = loadConfig(program.opts().config);
+    const secrets = loadSecrets(true);
+    const api = new MgmtApi(secrets.SUPABASE_ACCESS_TOKEN as string);
+    api
+      .assertAccess([cfg.source.ref, cfg.target.ref])
+      .then(() => provision(api, cfg, { confirm: Boolean(o.confirm) }))
+      .then((r) => {
+        if (!r.ok) process.exitCode = 1;
+      })
+      .catch((e) => {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      });
+  });
+
+program
+  .command("claim <orgSlug> <token>")
+  .description(
+    "org-level: move a project INTO another org via a claim token (preview unless --confirm)",
+  )
+  .option("--confirm", "actually perform the claim (default: preview + gate only)", false)
+  .action((orgSlug, token, o) => {
+    const secrets = loadSecrets(true);
+    const api = new MgmtApi(secrets.SUPABASE_ACCESS_TOKEN as string);
+    claim(api, log, { slug: orgSlug, token, confirm: Boolean(o.confirm) })
+      .then((r) => {
+        if (!r.ok) process.exitCode = 1;
+      })
+      .catch((e) => {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      });
+  });
+
+program
   .command("functions")
   .description("transfer Edge Functions via the supabase CLI")
   .option("--dry-run", "print commands only", false)
@@ -308,4 +383,12 @@ rehearse
     }),
   );
 
-program.parseAsync().finally(() => log.closeFile());
+program
+  .parseAsync()
+  .catch((e) => {
+    // Surface a clean one-line error instead of Bun's raw stack dump for any
+    // synchronous throw in an action handler (missing token, bad config, etc.).
+    log.err(e instanceof Error ? e.message : String(e));
+    process.exitCode = 1;
+  })
+  .finally(() => log.closeFile());
