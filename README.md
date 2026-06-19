@@ -26,7 +26,7 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 
 - **`FOR ALL TABLES` needs superuser** → we always create an empty publication and `ADD TABLE` explicitly.
 - **`copy_data = true`** → the subscription does a consistent initial copy; no fragile `pg_dump --snapshot` dance (the SQL-created slot can't export a snapshot anyway).
-- **Generated columns** (e.g. `documents.search_vector`) are recomputed on the subscriber and are **excluded from the reconciliation hash** — hashing them causes false mismatches.
+- **Generated columns** (e.g. `documents.search_vector`) are recomputed on the subscriber and are **excluded from the reconciliation hash** — hashing them causes false mismatches. They are **not free during the initial copy**: a heavy STORED generated column (a large `tsvector` over big text) is recomputed per row on the subscriber, and that CPU cost — not network/disk — bottlenecks the copy. Measured in the large rehearsal: **~11 MiB/s with the `search_vector` column vs ~80 MiB/s raw seed (~7× slower)**. For very large such columns, consider defining them as plain (non-generated) on the target during sync and converting to generated *after* the copy, or just budget the extra hours. `watch` now shows a live copy `%`.
 - **WAL bloat is the #1 outage** → `watch` aborts if the slot retains more than `watchdog.maxRetainedWalMb` on the source.
 - **Replica identity** → `preflight` fails any published table lacking a PK / unique index / `REPLICA IDENTITY FULL`.
 - **Subscriber privilege** → `preflight` checks the target role can `CREATE SUBSCRIPTION` (documented-supported, but verified).
