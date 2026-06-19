@@ -25,6 +25,7 @@ export async function watch(source: Db, target: Db, cfg: Config): Promise<void> 
   // actively error-LOOPING (counts climbing), not just a single transient at start.
   let prevApplyErr = -1;
   let prevSyncErr = -1;
+  let pollCount = 0;
 
   // Expected copy volume (heap+toast of published tables on the source) so the
   // long initial COPY shows a % instead of a static 0/N for hours. Best-effort.
@@ -108,12 +109,14 @@ export async function watch(source: Db, target: Db, cfg: Config): Promise<void> 
       }
 
       // No apply worker attached at all => subscription disabled or crashed and not
-      // restarting. Distinct from "slot inactive" (that's the source side).
+      // restarting. Distinct from "slot inactive" (that's the source side). Skip on the
+      // very first poll: right after CREATE SUBSCRIPTION the apply worker takes ~1s to
+      // attach, so a first-poll null pid is expected, not a fault.
       const [subw] = await target`
       SELECT count(*)::int AS workers FROM pg_stat_subscription s
       JOIN pg_subscription ps ON ps.oid = s.subid
       WHERE ps.subname = ${subscription} AND s.pid IS NOT NULL`;
-      if (Number(subw?.workers ?? 0) === 0) {
+      if (pollCount > 0 && Number(subw?.workers ?? 0) === 0) {
         log.warn(
           `subscription ${subscription} has NO running worker (pid is null) — it may be disabled ` +
             "or crashed without restarting. Replication is stalled until a worker attaches.",
@@ -158,6 +161,7 @@ export async function watch(source: Db, target: Db, cfg: Config): Promise<void> 
         return;
       }
       consecutiveErrors = 0; // a clean poll resets the transient-failure streak
+      pollCount++;
     } catch (e) {
       if (e instanceof FatalWatchError) throw e;
       const msg = e instanceof Error ? e.message : String(e);
