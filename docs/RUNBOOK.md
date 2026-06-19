@@ -198,6 +198,26 @@ over, run `bun start teardown` first.
 
 ## 9. Cutover  ← brief downtime starts here
 
+### Migration-day signals — success & abort thresholds
+
+Decide these BEFORE you stop writes. The tool owns the **data-plane** gates (left);
+your Grafana/observability stack owns the **app-tier** gates (right). Abort if either trips.
+
+| Phase | Watch (data-plane, this tool) | Watch (app-tier, your dashboards) |
+|---|---|---|
+| Initial copy (`watch`) | WAL retained MB < `watchdog.maxRetainedWalMb`; slot `active`; `wal_status` stays `reserved`/`extended` (not `lost`); `apply_error_count`/`sync_error_count` flat | source DB CPU / disk IOPS / disk latency headroom; source not approaching connection saturation |
+| Lag drain (`cutover` 9b) | lag → 0 within `--max-lag-wait`; quiesce check reports source WAL **quiescent** (no active write backends) | app confirmed in read-only / down; no client write retries hitting the source |
+| Verify (`reconcile` 9c) | `RECONCILE PASSED` (zero mismatched buckets, ledger clean) | — |
+| Post-repoint (9e) | sequences resynced (cutover log shows each `setval`) | target p95/p99 latency within X% of source baseline; 5xx < Y; connection pool not spiking from retry storms |
+
+**Hard abort thresholds (define concrete numbers from your baselines):**
+- `watch` self-aborts on WAL watchdog and on `wal_status=lost` — do **not** override these.
+- Lag fails to drain in `--max-lag-wait` → writes are not actually stopped; do not proceed.
+- `reconcile` reports any mismatch → do **not** complete cutover; investigate.
+- App-tier: sustained 5xx > Y for N min, or DB p95 > X for N min, after repoint → roll back (§12).
+
+Keep one Grafana view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `sbmigrate watch`/`status` output (or its `--log-file`).
+
 ```bash
 # 9a. STOP application writes to the SOURCE (put the app in read-only / take it down).
 #     This is the only moment of downtime.
@@ -255,19 +275,67 @@ bun start teardown      # drops subscription → slot → publication, in the sa
 
 ---
 
-## 12. Abort / rollback (before cutover only)
+## 12. Abort / rollback — decision tree by phase
 
-If anything looks wrong **before step 9a** (you have not stopped source writes yet):
+The rollback that's available depends on where you are. **The point of no return for a
+lossless rollback is step 9e** (repointing the app at the target). Know which phase you're
+in before you act.
+
+### Phase A — before 9a (source still taking writes)
+
+Abort is **free**. The source has served continuously and the target is a throwaway.
 
 ```bash
-bun start teardown      # removes the subscription/slot/publication; source is untouched
+bun start teardown      # drops subscription → slot → publication; source untouched
+# optionally delete the target project
 ```
 
-The source keeps serving the whole time up to cutover, so aborting pre-cutover is free —
-just tear down and optionally delete the target project. After cutover (9a), rolling back
-means pointing the app back at the source **only if** you have not taken writes on the
-target; once the target has taken writes, the source is stale and you must reconcile
-forward, not back.
+### Phase B — after 9a, before 9e (writes stopped, app NOT yet repointed)
+
+Still **lossless**: the target has taken zero application writes, so the source is current.
+Roll back by simply not flipping the app:
+
+```bash
+bun start teardown      # remove replication objects
+# re-enable application writes on the SOURCE and bring the app back up unchanged
+```
+
+This is the **last lossless rollback point** unless you set up reverse replication (below).
+
+### Phase C — after 9e (app repointed, target taking writes) — POINT OF NO RETURN
+
+Rolling straight back to the source now **loses every write the target took since 9e**,
+because nothing replicates target → source. Your options, worst-case first:
+
+1. **Roll forward** (preferred): fix the problem on the target. The source is already stale;
+   it is no longer a clean fallback.
+2. **Accept the loss window**: if the target took only a few minutes of writes and they're
+   recoverable/negligible, repoint back to the source and manually re-apply what was lost.
+   You **must never** then re-enable writes on both — pick one authoritative DB (split-brain).
+3. **Lossless rollback** — only if you set up **reverse replication** at cutover (below).
+
+### Optional: reverse replication for a lossless rollback window
+
+If the migration is high-stakes and you want Phase C to stay lossless during a validation
+window, establish target → source streaming **after** `reconcile` passes (9c) and **before**
+you repoint the app (9e). Use a second config with the roles swapped and **`copy_data: false`**
+(the data already matches — you only want new changes to stream back):
+
+```bash
+# migrate.reverse.yaml: source.ref/target.ref swapped, distinct slot/publication/subscription
+# names, replication.copyData: false. SOURCE_DB_URL/TARGET_DB_URL swapped in a reverse .env.
+bun start -c migrate.reverse.yaml replicate    # target → source, streaming only (no copy)
+```
+
+Now writes to the new target also flow back to the old source. If you must roll back inside
+the window: stop writes on the target, `bun start -c migrate.reverse.yaml cutover` (drain the
+reverse lag), repoint the app to the source, and tear down both directions. Once you're
+confident in the target, tear down the reverse path (§11 with the reverse config) and the old
+project becomes a cold standby.
+
+> Reverse replication requires the source to still satisfy the same preflight gates (wal_level,
+> replica identity) it always had — it does. It is **not** bidirectional/active-active: only one
+> side ever takes application writes at a time. Its sole purpose is a clean escape hatch.
 
 ---
 

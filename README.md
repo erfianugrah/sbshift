@@ -40,6 +40,8 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 - **Direct connection, not pooler**; target needs IPv6 (or the source's IPv4 add-on).
 - **Teardown order** → disable → `SET (slot_name = NONE)` → drop subscription → drop slot → drop publication, or it hangs.
 - **Never re-enable writes on the source** after cutover (split-brain) — `cutover` says so.
+- **Rollback has a point of no return** → lossless rollback is free before you repoint the app (step 9e); after that, rolling back to the source loses every write the target took. The runbook has the full per-phase decision tree and an optional reverse-replication escape hatch. See `docs/RUNBOOK.md` §12.
+- **Define abort thresholds before cutover** → the tool owns the data-plane gates (WAL watchdog, lag-drain deadline, `reconcile` verdict, apply-error count); your dashboards own the app-tier gates (5xx, p95, connection saturation). `docs/RUNBOOK.md` §9 maps both to migration-day signals.
 - **New project = new JWT secret + API keys** → existing user sessions/JWTs invalidate (your users re-login), and the app's `SUPABASE_URL` + anon/service keys change. `config-sync` copies settings but **never secrets** — re-enter them by hand.
 - **`config-sync` is a TS port, not yet validated against the live Management API** — always run `--dry-run` and eyeball the diff before applying.
 
