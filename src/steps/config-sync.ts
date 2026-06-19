@@ -6,18 +6,22 @@ import type { MgmtApi } from "../mgmt.ts";
  * TS port of Supabase's documented sync_supabase_config.sh.
  * Copies non-data project configuration SOURCE -> TARGET via the Management API.
  *
- * SECURITY: every secret-bearing key is stripped before the payload is sent.
- * This is the auditable replacement for the bash `jq` filter. If you add a new
- * config section, extend STRIP rules below — do not relax them.
+ * SECURITY: by default every secret-bearing key is stripped before the payload
+ * is sent (the auditable replacement for the bash `jq` filter). Copying auth
+ * integration secrets (SMTP/OAuth/SMS/hook creds) and project/Edge-Function
+ * secrets is OPT-IN via configSync.secrets / configSync.projectSecrets. The JWT
+ * signing secret + API keys are never in these payloads (separate endpoints),
+ * so they can never be cloned here. If you add a new config section, extend the
+ * STRIP rules below — do not relax the default-strip behaviour.
  */
 
 type Section = {
   key: keyof Config["configSync"];
   label: string;
   getPath: string;
-  method: "PATCH" | "PUT";
+  method: "PATCH" | "PUT" | "POST";
   putPath: string;
-  transform: (src: Record<string, unknown>) => Record<string, unknown>;
+  transform: (src: Record<string, unknown>, cfg?: Config) => Record<string, unknown>;
 };
 
 /** Keys that must never be copied because they hold secrets. */
@@ -55,10 +59,125 @@ function isAuthSecret(k: string): boolean {
   return false;
 }
 
-export function stripAuth(src: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Strip auth secrets unless `copySecrets` is set. When copying, the integration
+ * creds (SMTP/OAuth/SMS/hook secrets) ARE kept — these are the 3rd-party
+ * credentials an operator wants to carry across on a migration. The JWT signing
+ * secret + API keys are NOT in this payload at all (separate endpoints), so
+ * copying here can never clone the project's signing key.
+ */
+export function stripAuth(
+  src: Record<string, unknown>,
+  copySecrets = false,
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(src)) {
-    if (!isAuthSecret(k)) out[k] = v;
+    if (copySecrets || !isAuthSecret(k)) out[k] = v;
+  }
+  return out;
+}
+
+/** Pure transform for network-restrictions GET → POST /apply body. Exported for tests. */
+export function toNetworkRestrictions(src: Record<string, unknown>): Record<string, unknown> {
+  const c = (src.config ?? {}) as { dbAllowedCidrs?: string[]; dbAllowedCidrsV6?: string[] };
+  const out: Record<string, unknown> = {};
+  if (Array.isArray(c.dbAllowedCidrs)) out.dbAllowedCidrs = c.dbAllowedCidrs;
+  if (Array.isArray(c.dbAllowedCidrsV6)) out.dbAllowedCidrsV6 = c.dbAllowedCidrsV6;
+  return out;
+}
+
+/** Pure transform for ssl-enforcement GET → PUT body. Exported for tests. */
+export function toSslEnforcement(src: Record<string, unknown>): Record<string, unknown> {
+  const cc = (src.currentConfig ?? {}) as { database?: boolean };
+  return { requestedConfig: { database: Boolean(cc.database) } };
+}
+
+/** Pure transform for project /secrets GET → bulk POST body. Exported for tests. */
+export function toProjectSecrets(
+  src: Array<{ name?: unknown; value?: unknown }>,
+): Array<{ name: string; value: string }> {
+  return src
+    .filter((s) => s && typeof s.name === "string" && typeof s.value === "string")
+    .map((s) => ({ name: s.name as string, value: s.value as string }));
+}
+
+// ── Auth sub-resources (separate endpoints the /config/auth blob does NOT carry) ──
+
+export interface ThirdPartyAuth {
+  id?: string;
+  type?: string;
+  oidc_issuer_url?: string;
+  jwks_url?: string;
+  custom_jwks?: unknown;
+}
+export interface TpaPost {
+  oidc_issuer_url?: string;
+  jwks_url?: string;
+  custom_jwks?: unknown;
+}
+
+/** Identity of a third-party-auth integration (issuer or JWKS url). */
+export function tpaKey(t: { oidc_issuer_url?: string; jwks_url?: string }): string {
+  return t.oidc_issuer_url ?? t.jwks_url ?? "";
+}
+
+/** Pure: POST bodies for source TPA integrations missing on the target (additive). Exported for tests. */
+export function planThirdPartyAuth(src: ThirdPartyAuth[], tgt: ThirdPartyAuth[]): TpaPost[] {
+  const have = new Set(tgt.map(tpaKey).filter(Boolean));
+  const out: TpaPost[] = [];
+  for (const t of src) {
+    const k = tpaKey(t);
+    if (!k || have.has(k)) continue;
+    const body: TpaPost = {};
+    if (t.oidc_issuer_url) body.oidc_issuer_url = t.oidc_issuer_url;
+    if (t.jwks_url) body.jwks_url = t.jwks_url;
+    if (t.custom_jwks != null) body.custom_jwks = t.custom_jwks;
+    out.push(body);
+  }
+  return out;
+}
+
+export interface SamlProvider {
+  id?: string;
+  saml?: {
+    entity_id?: string;
+    metadata_url?: string;
+    metadata_xml?: string;
+    attribute_mapping?: unknown;
+    name_id_format?: string;
+  };
+  domains?: Array<{ domain?: string }>;
+}
+export interface SsoPost {
+  type: "saml";
+  metadata_url?: string;
+  metadata_xml?: string;
+  domains?: string[];
+  attribute_mapping?: unknown;
+  name_id_format?: string;
+}
+
+/**
+ * Pure: POST bodies for source SSO/SAML providers missing on the target, keyed
+ * by SAML entity_id (additive). Prefers metadata_url over metadata_xml so the
+ * target re-fetches fresh metadata. Exported for tests.
+ */
+export function planSsoProviders(src: SamlProvider[], tgt: SamlProvider[]): SsoPost[] {
+  const have = new Set(tgt.map((p) => p.saml?.entity_id).filter(Boolean));
+  const out: SsoPost[] = [];
+  for (const p of src) {
+    const eid = p.saml?.entity_id;
+    if (!eid || have.has(eid)) continue;
+    const body: SsoPost = { type: "saml" };
+    if (p.saml?.metadata_url) body.metadata_url = p.saml.metadata_url;
+    else if (p.saml?.metadata_xml) body.metadata_xml = p.saml.metadata_xml;
+    const domains = (p.domains ?? [])
+      .map((d) => d.domain)
+      .filter((d): d is string => typeof d === "string" && d.length > 0);
+    if (domains.length > 0) body.domains = domains;
+    if (p.saml?.attribute_mapping != null) body.attribute_mapping = p.saml.attribute_mapping;
+    if (p.saml?.name_id_format) body.name_id_format = p.saml.name_id_format;
+    out.push(body);
   }
   return out;
 }
@@ -80,7 +199,7 @@ const SECTIONS: Section[] = [
     getPath: "/config/auth",
     method: "PATCH",
     putPath: "/config/auth",
-    transform: stripAuth,
+    transform: (s, cfg) => stripAuth(s, cfg?.configSync.secrets ?? false),
   },
   {
     key: "realtime",
@@ -125,6 +244,22 @@ const SECTIONS: Section[] = [
     putPath: "/config/storage",
     transform: stripStorage,
   },
+  {
+    key: "sslEnforcement",
+    label: "SSL Enforcement",
+    getPath: "/ssl-enforcement",
+    method: "PUT",
+    putPath: "/ssl-enforcement",
+    transform: toSslEnforcement,
+  },
+  {
+    key: "networkRestrictions",
+    label: "Network Restrictions",
+    getPath: "/network-restrictions",
+    method: "POST",
+    putPath: "/network-restrictions/apply",
+    transform: toNetworkRestrictions,
+  },
 ];
 
 export interface ConfigSyncResult {
@@ -155,7 +290,7 @@ export async function configSync(
       continue;
     }
 
-    const payload = section.transform(src.body);
+    const payload = section.transform(src.body, cfg);
     if (Object.keys(payload).length === 0) {
       log.warn(`${section.label}: nothing to apply after stripping — skipping`);
       result.skipped++;
@@ -185,8 +320,161 @@ export async function configSync(
     }
   }
 
-  log.warn(
-    "Secrets are NOT copied (SMTP, OAuth client secrets, SMS, JWT, captcha, passkey, hook credentials). Re-enter on target.",
-  );
+  // Project (Edge Function) secrets — array-shaped, so handled outside SECTIONS.
+  if (cfg.configSync.projectSecrets) {
+    const verdict = await syncProjectSecrets(api, cfg, opts);
+    result[verdict]++;
+  } else {
+    result.skipped++;
+  }
+
+  // Auth sub-resources on separate endpoints (not in the /config/auth blob).
+  if (cfg.configSync.thirdPartyAuth) {
+    result[await syncThirdPartyAuth(api, cfg, opts)]++;
+  } else {
+    result.skipped++;
+  }
+  if (cfg.configSync.ssoProviders) {
+    result[await syncSsoProviders(api, cfg, opts)]++;
+  } else {
+    result.skipped++;
+  }
+
+  if (cfg.configSync.secrets || cfg.configSync.projectSecrets) {
+    log.warn(
+      "Auth/project integration secrets WERE copied per config. The JWT signing secret + API keys " +
+        "are still NOT copied (new project = new keys). Org-level data (settings, members/roles, " +
+        "entitlements) is read-only in the Management API and does NOT migrate \u2014 re-invite the team by hand.",
+    );
+  } else {
+    log.warn(
+      "Secrets are NOT copied (SMTP, OAuth client secrets, SMS, JWT, captcha, passkey, hook credentials). " +
+        "Re-enter on target, or set configSync.secrets / configSync.projectSecrets to copy integration creds. " +
+        "Org-level data (settings, members/roles, entitlements) is read-only in the Management API " +
+        "and does NOT migrate \u2014 re-invite the team on the target org by hand.",
+    );
+  }
   return result;
+}
+
+/**
+ * Copy project (Edge Function) secrets via the bulk /secrets endpoint.
+ * Plaintext values — opt-in via configSync.projectSecrets. Dry-run REDACTS
+ * values (names only) so the audit log never captures the secret material.
+ */
+async function syncProjectSecrets(
+  api: MgmtApi,
+  cfg: Config,
+  opts: { dryRun: boolean },
+): Promise<"ok" | "err" | "skipped"> {
+  log.info("--- Project Secrets (Edge Function env) ---");
+  const src = await api.get<Array<{ name?: unknown; value?: unknown }>>(cfg.source.ref, "/secrets");
+  if (src.status !== 200 || !Array.isArray(src.body)) {
+    log.warn(`GET source project secrets failed (HTTP ${src.status}) \u2014 skipping`);
+    return "skipped";
+  }
+  const payload = toProjectSecrets(src.body);
+  if (payload.length === 0) {
+    log.warn("no project secrets to copy \u2014 skipping");
+    return "skipped";
+  }
+  if (opts.dryRun) {
+    log.detail(`would POST ${payload.length} project secrets (values redacted):`);
+    for (const s of payload) log.detail(`  ${s.name} = ****`);
+    return "ok";
+  }
+  const res = await api.write(cfg.target.ref, "/secrets", "POST", payload);
+  if (res.status >= 200 && res.status < 300) {
+    log.ok(`Project Secrets applied: ${payload.length} (HTTP ${res.status})`);
+    return "ok";
+  }
+  log.err(`Project Secrets POST failed (HTTP ${res.status}): ${res.text.slice(0, 300)}`);
+  return "err";
+}
+
+/** Recreate third-party-auth integrations missing on the target (additive). */
+async function syncThirdPartyAuth(
+  api: MgmtApi,
+  cfg: Config,
+  opts: { dryRun: boolean },
+): Promise<"ok" | "err" | "skipped"> {
+  log.info("--- Third-Party Auth integrations ---");
+  const [src, tgt] = await Promise.all([
+    api.get<ThirdPartyAuth[]>(cfg.source.ref, "/config/auth/third-party-auth"),
+    api.get<ThirdPartyAuth[]>(cfg.target.ref, "/config/auth/third-party-auth"),
+  ]);
+  if (src.status !== 200 || !Array.isArray(src.body)) {
+    log.warn(`GET source third-party-auth failed (HTTP ${src.status}) \u2014 skipping`);
+    return "skipped";
+  }
+  const plan = planThirdPartyAuth(src.body, Array.isArray(tgt.body) ? tgt.body : []);
+  if (plan.length === 0) {
+    log.ok("third-party-auth: target already has all source integrations (or source has none)");
+    return "skipped";
+  }
+  if (opts.dryRun) {
+    for (const b of plan)
+      log.detail(`would POST third-party-auth: ${b.oidc_issuer_url ?? b.jwks_url}`);
+    return "ok";
+  }
+  let ok = true;
+  for (const b of plan) {
+    const res = await api.write(cfg.target.ref, "/config/auth/third-party-auth", "POST", b);
+    if (res.status >= 200 && res.status < 300) {
+      log.ok(`added third-party-auth: ${b.oidc_issuer_url ?? b.jwks_url}`);
+    } else {
+      ok = false;
+      log.err(`third-party-auth POST failed (HTTP ${res.status}): ${res.text.slice(0, 200)}`);
+    }
+  }
+  return ok ? "ok" : "err";
+}
+
+/** Recreate SSO/SAML providers missing on the target (additive, keyed by entity_id). */
+async function syncSsoProviders(
+  api: MgmtApi,
+  cfg: Config,
+  opts: { dryRun: boolean },
+): Promise<"ok" | "err" | "skipped"> {
+  log.info("--- SSO / SAML providers ---");
+  const [src, tgt] = await Promise.all([
+    api.get<{ items?: SamlProvider[] }>(cfg.source.ref, "/config/auth/sso/providers"),
+    api.get<{ items?: SamlProvider[] }>(cfg.target.ref, "/config/auth/sso/providers"),
+  ]);
+  // 404 = SAML 2.0 not enabled for this project.
+  if (src.status === 404) {
+    log.ok("SSO: SAML 2.0 not enabled on source \u2014 nothing to migrate");
+    return "skipped";
+  }
+  if (src.status !== 200 || !src.body) {
+    log.warn(`GET source SSO providers failed (HTTP ${src.status}) \u2014 skipping`);
+    return "skipped";
+  }
+  const tgtItems = tgt.status === 200 && tgt.body?.items ? tgt.body.items : [];
+  const plan = planSsoProviders(src.body.items ?? [], tgtItems);
+  if (plan.length === 0) {
+    log.ok("SSO: target already has all source providers (or source has none)");
+    return "skipped";
+  }
+  if (opts.dryRun) {
+    for (const b of plan)
+      log.detail(`would POST SSO provider (domains: ${(b.domains ?? []).join(",") || "none"})`);
+    return "ok";
+  }
+  let ok = true;
+  for (const b of plan) {
+    const res = await api.write(cfg.target.ref, "/config/auth/sso/providers", "POST", b);
+    if (res.status >= 200 && res.status < 300) {
+      log.ok(`added SSO provider (domains: ${(b.domains ?? []).join(",") || "none"})`);
+    } else if (res.status === 404) {
+      ok = false;
+      log.err(
+        "SSO POST got 404 \u2014 SAML 2.0 is not enabled on the TARGET; enable it (plan feature) first",
+      );
+    } else {
+      ok = false;
+      log.err(`SSO provider POST failed (HTTP ${res.status}): ${res.text.slice(0, 200)}`);
+    }
+  }
+  return ok ? "ok" : "err";
 }

@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { dropNulls, stripAuth, stripStorage } from "../src/steps/config-sync.ts";
+import {
+  dropNulls,
+  planSsoProviders,
+  planThirdPartyAuth,
+  type SamlProvider,
+  stripAuth,
+  stripStorage,
+  type ThirdPartyAuth,
+  toNetworkRestrictions,
+  toProjectSecrets,
+  toSslEnforcement,
+  tpaKey,
+} from "../src/steps/config-sync.ts";
 
 describe("stripAuth — secrets must never be copied", () => {
   const input = {
@@ -81,6 +93,154 @@ describe("stripAuth — secrets must never be copied", () => {
     expect(out).not.toHaveProperty("hook_send_sms_secrets");
     expect(out).not.toHaveProperty("hook_custom_access_token_secret");
     expect(out).not.toHaveProperty("hook_custom_access_token_headers");
+  });
+});
+
+describe("stripAuth copySecrets=true — integration creds are kept", () => {
+  const input = {
+    site_url: "https://example.com",
+    smtp_pass: "supersecret",
+    external_apple_secret: "apple",
+    sms_twilio_auth_token: "tok",
+    hook_send_sms_secrets: "v1,whsec_abc",
+  };
+  test("copies secrets when opted in", () => {
+    const out = stripAuth(input, true);
+    expect(out.smtp_pass).toBe("supersecret");
+    expect(out.external_apple_secret).toBe("apple");
+    expect(out.sms_twilio_auth_token).toBe("tok");
+    expect(out.hook_send_sms_secrets).toBe("v1,whsec_abc");
+    expect(out.site_url).toBe("https://example.com");
+  });
+  test("default (no flag) still strips", () => {
+    const out = stripAuth(input);
+    expect(out).not.toHaveProperty("smtp_pass");
+    expect(out).not.toHaveProperty("external_apple_secret");
+    expect(out.site_url).toBe("https://example.com");
+  });
+});
+
+describe("toSslEnforcement", () => {
+  test("maps currentConfig.database → requestedConfig.database", () => {
+    expect(
+      toSslEnforcement({ currentConfig: { database: true }, appliedSuccessfully: true }),
+    ).toEqual({
+      requestedConfig: { database: true },
+    });
+    expect(toSslEnforcement({ currentConfig: { database: false } })).toEqual({
+      requestedConfig: { database: false },
+    });
+  });
+  test("missing currentConfig coerces to false (never undefined)", () => {
+    expect(toSslEnforcement({})).toEqual({ requestedConfig: { database: false } });
+  });
+});
+
+describe("toNetworkRestrictions", () => {
+  test("lifts config CIDR arrays into the apply body", () => {
+    expect(
+      toNetworkRestrictions({
+        entitlement: "allowed",
+        config: { dbAllowedCidrs: ["1.2.3.0/24"], dbAllowedCidrsV6: ["::/0"] },
+      }),
+    ).toEqual({ dbAllowedCidrs: ["1.2.3.0/24"], dbAllowedCidrsV6: ["::/0"] });
+  });
+  test("omits absent arrays → empty object → section skipped (no accidental open)", () => {
+    expect(toNetworkRestrictions({ config: {} })).toEqual({});
+    expect(toNetworkRestrictions({})).toEqual({});
+  });
+});
+
+describe("toProjectSecrets", () => {
+  test("keeps name+value, drops updated_at and malformed rows", () => {
+    const out = toProjectSecrets([
+      { name: "STRIPE_KEY", value: "sk_live_x", updated_at: "2026-01-01" } as never,
+      { name: "NO_VALUE" } as never,
+      { value: "no name" } as never,
+      { name: "SENDGRID", value: "SG.abc" },
+    ]);
+    expect(out).toEqual([
+      { name: "STRIPE_KEY", value: "sk_live_x" },
+      { name: "SENDGRID", value: "SG.abc" },
+    ]);
+  });
+  test("empty input → empty array", () => {
+    expect(toProjectSecrets([])).toEqual([]);
+  });
+});
+
+describe("planThirdPartyAuth", () => {
+  const src: ThirdPartyAuth[] = [
+    { id: "1", type: "oidc", oidc_issuer_url: "https://firebase/x" },
+    { id: "2", type: "oidc", jwks_url: "https://auth0/jwks" },
+  ];
+  test("posts source integrations missing on target; drops id/type/resolved", () => {
+    const plan = planThirdPartyAuth(src, []);
+    expect(plan).toEqual([
+      { oidc_issuer_url: "https://firebase/x" },
+      { jwks_url: "https://auth0/jwks" },
+    ]);
+  });
+  test("dedupes against existing target by issuer/jwks key", () => {
+    const plan = planThirdPartyAuth(src, [{ oidc_issuer_url: "https://firebase/x" }]);
+    expect(plan).toEqual([{ jwks_url: "https://auth0/jwks" }]);
+  });
+  test("keeps custom_jwks when present, skips keyless entries", () => {
+    const plan = planThirdPartyAuth(
+      [{ jwks_url: "https://j", custom_jwks: { keys: [] } }, { type: "broken" }],
+      [],
+    );
+    expect(plan).toEqual([{ jwks_url: "https://j", custom_jwks: { keys: [] } }]);
+  });
+  test("tpaKey prefers issuer over jwks", () => {
+    expect(tpaKey({ oidc_issuer_url: "a", jwks_url: "b" })).toBe("a");
+    expect(tpaKey({ jwks_url: "b" })).toBe("b");
+    expect(tpaKey({})).toBe("");
+  });
+});
+
+describe("planSsoProviders", () => {
+  const src: SamlProvider[] = [
+    {
+      id: "p1",
+      saml: {
+        entity_id: "https://idp/saml",
+        metadata_url: "https://idp/meta",
+        attribute_mapping: { keys: { email: { name: "mail" } } },
+        name_id_format: "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+      },
+      domains: [{ domain: "acme.com" }, { domain: "acme.io" }],
+    },
+  ];
+  test("builds POST body from saml fields + maps domains to string[]", () => {
+    const plan = planSsoProviders(src, []);
+    expect(plan).toEqual([
+      {
+        type: "saml",
+        metadata_url: "https://idp/meta",
+        domains: ["acme.com", "acme.io"],
+        attribute_mapping: { keys: { email: { name: "mail" } } },
+        name_id_format: "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent",
+      },
+    ]);
+  });
+  test("dedupes by entity_id", () => {
+    expect(planSsoProviders(src, [{ saml: { entity_id: "https://idp/saml" } }])).toEqual([]);
+  });
+  test("prefers metadata_url over metadata_xml", () => {
+    const plan = planSsoProviders(
+      [{ saml: { entity_id: "e", metadata_url: "u", metadata_xml: "<xml/>" } }],
+      [],
+    );
+    expect(plan[0]?.metadata_url).toBe("u");
+    expect(plan[0]).not.toHaveProperty("metadata_xml");
+  });
+  test("falls back to metadata_xml when no url", () => {
+    const plan = planSsoProviders([{ saml: { entity_id: "e", metadata_xml: "<xml/>" } }], []);
+    expect(plan[0]?.metadata_xml).toBe("<xml/>");
+  });
+  test("skips providers with no entity_id", () => {
+    expect(planSsoProviders([{ saml: {} }, {}], [])).toEqual([]);
   });
 });
 

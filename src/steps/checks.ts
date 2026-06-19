@@ -78,6 +78,133 @@ export async function checkReplicationCapacity(
 }
 
 /**
+ * "Invisible" custom Postgres config detection.
+ *
+ * The Management API's `/config/database/postgres` endpoint (config-sync's
+ * `dbPostgres` section) only carries the subset of GUCs Supabase exposes there.
+ * It does NOT see settings applied directly in SQL via
+ * `ALTER ROLE ... SET` / `ALTER DATABASE ... SET` (statement_timeout,
+ * auto_explain.*, pg_stat_statements.*, pgaudit.*, session_replication_role,
+ * ...). Those live in `pg_db_role_setting` and are invisible to config-sync —
+ * exactly the gap. Because pgshift has a direct DB connection we CAN read them,
+ * diff source vs target, and tell the operator what to re-apply.
+ *
+ * We deliberately DETECT + REPORT, never auto-copy: many of these are tuned to
+ * the source's compute add-on (shared_buffers, work_mem, max_connections) and
+ * blindly applying them onto a smaller target causes instability — Supabase's
+ * own docs warn to review custom config when compute changes.
+ */
+export interface GucOverride {
+  /** `<role>@<database>` scope; `*` where the row is role- or db-wide. */
+  scope: string;
+  key: string;
+  value: string;
+}
+
+/** Parse pg_db_role_setting rows (setconfig is a text[] of `key=value`). Exported for tests. */
+export function parseRoleSettings(
+  rows: Array<{ rolname?: string | null; datname?: string | null; setconfig?: string[] | null }>,
+): GucOverride[] {
+  const out: GucOverride[] = [];
+  for (const r of rows) {
+    const scope = `${r.rolname ?? "*"}@${r.datname ?? "*"}`;
+    for (const kv of r.setconfig ?? []) {
+      const eq = kv.indexOf("=");
+      if (eq < 0) continue;
+      out.push({ scope, key: kv.slice(0, eq), value: kv.slice(eq + 1) });
+    }
+  }
+  return out;
+}
+
+/** GUCs whose value is tuned to compute size — must be reviewed, never blindly copied. */
+export const COMPUTE_TUNED = new Set([
+  "shared_buffers",
+  "effective_cache_size",
+  "work_mem",
+  "maintenance_work_mem",
+  "max_connections",
+  "max_parallel_workers",
+  "max_parallel_workers_per_gather",
+  "max_parallel_maintenance_workers",
+  "max_worker_processes",
+  "max_wal_size",
+]);
+
+export interface GucDiff {
+  /** present on source, absent on target. */
+  sourceOnly: GucOverride[];
+  /** same scope+key on both, but the value differs. */
+  changed: Array<{ scope: string; key: string; source: string; target: string }>;
+}
+
+/** Pure diff of source vs target GUC overrides. Exported for tests. */
+export function diffGucOverrides(src: GucOverride[], tgt: GucOverride[]): GucDiff {
+  const tgtMap = new Map(tgt.map((o) => [`${o.scope}\u0000${o.key}`, o.value]));
+  const sourceOnly: GucOverride[] = [];
+  const changed: GucDiff["changed"] = [];
+  for (const o of src) {
+    const k = `${o.scope}\u0000${o.key}`;
+    if (!tgtMap.has(k)) sourceOnly.push(o);
+    else if (tgtMap.get(k) !== o.value) {
+      changed.push({
+        scope: o.scope,
+        key: o.key,
+        source: o.value,
+        target: tgtMap.get(k) as string,
+      });
+    }
+  }
+  return { sourceOnly, changed };
+}
+
+const ROLE_SETTING_SQL = `
+  SELECT r.rolname, d.datname, s.setconfig
+  FROM pg_db_role_setting s
+  LEFT JOIN pg_roles r    ON r.oid = s.setrole
+  LEFT JOIN pg_database d ON d.oid = s.setdatabase`;
+
+/**
+ * Report custom ALTER ROLE/DATABASE GUC overrides on the source that are
+ * missing or different on the target. Warn-only — these are the config-sync
+ * blind spot, and compute-tuned ones are flagged for manual review.
+ */
+export async function checkCustomPostgresConfig(
+  source: Db,
+  target: Db,
+  sink: CapacitySink,
+): Promise<void> {
+  const [srcRows, tgtRows] = await Promise.all([
+    source.unsafe(ROLE_SETTING_SQL),
+    target.unsafe(ROLE_SETTING_SQL),
+  ]);
+  const src = parseRoleSettings(srcRows as never);
+  const tgt = parseRoleSettings(tgtRows as never);
+
+  if (src.length === 0) {
+    sink.ok("no custom ALTER ROLE/DATABASE GUC overrides on source");
+    return;
+  }
+  const { sourceOnly, changed } = diffGucOverrides(src, tgt);
+  if (sourceOnly.length === 0 && changed.length === 0) {
+    sink.ok(`source has ${src.length} custom GUC override(s) — all present on target`);
+    return;
+  }
+  for (const o of sourceOnly) {
+    const tuned = COMPUTE_TUNED.has(o.key) ? " [compute-tuned — review before copying]" : "";
+    sink.warn(`custom GUC missing on target: ${o.scope} ${o.key}=${o.value}${tuned}`);
+  }
+  for (const c of changed) {
+    sink.warn(`custom GUC differs: ${c.scope} ${c.key} — source=${c.source} target=${c.target}`);
+  }
+  sink.warn(
+    "These are SQL-level overrides (pg_db_role_setting) — config-sync's Management-API endpoint does " +
+      "NOT carry them. Re-apply intentionally via ALTER ROLE/DATABASE ... SET; do not blindly copy " +
+      "compute-tuned values onto a smaller target.",
+  );
+}
+
+/**
  * Version-gated SQL for the CREATE SUBSCRIPTION privilege check.
  *
  * `pg_create_subscription` is a PG16+ role; calling

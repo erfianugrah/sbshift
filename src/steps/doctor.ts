@@ -1,7 +1,11 @@
 import type { Config, Secrets } from "../config.ts";
 import { classifyConn, connect, type Db } from "../db.ts";
 import { log } from "../log.ts";
-import { checkReplicationCapacity, subscribeGrantSQL } from "./checks.ts";
+import {
+  checkCustomPostgresConfig,
+  checkReplicationCapacity,
+  subscribeGrantSQL,
+} from "./checks.ts";
 
 /**
  * `doctor` — an automated, re-runnable readiness checklist.
@@ -9,7 +13,8 @@ import { checkReplicationCapacity, subscribeGrantSQL } from "./checks.ts";
  * Everything you'd otherwise check by hand with psql before a migration:
  * connection shape (pooler vs direct), reachability, source wal_level + replica
  * identity, the reconcile hashColumns ↔ live-schema cross-check, stale
- * publication/slot leftovers, row counts, and (when the target exists) its PG
+ * publication/slot leftovers, row counts, custom pg_db_role_setting GUC
+ * overrides that config-sync cannot carry, and (when the target exists) its PG
  * version + CREATE SUBSCRIPTION grant + whether the schema is loaded yet.
  *
  * Tolerant by design: the target usually does NOT exist during prep, so an
@@ -325,6 +330,10 @@ async function targetChecks(
   // replication-capacity GUCs (warn-only): slot/sender headroom on source, worker-process
   // floor on target (the Azure Flexible Server "out of background worker slots" footgun).
   if (sourceReachable) await checkReplicationCapacity(source, target, cfg, s);
+
+  // "Invisible" custom Postgres config (warn-only): ALTER ROLE/DATABASE SET overrides in
+  // pg_db_role_setting that config-sync's Management-API endpoint does NOT carry.
+  if (sourceReachable) await checkCustomPostgresConfig(source, target, s);
 
   // non-default extensions present on source must be enabled on target before schema load
   if (sourceReachable) {
