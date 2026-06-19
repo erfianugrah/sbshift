@@ -15,22 +15,30 @@
  *
  * Run inside the test compose network (service-DNS source:/target:):
  *   docker compose -f docker-compose.test.yml run --rm \
- *     -e ROWS=1000000 -e PAYLOAD_CHARS=300 runner \
+ *     -e ROWS=1000000 runner \
  *     sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
  *
  * ROWS sizes the documents (gen-column) table; users/events/audit scale off it.
  *
- * WRITE_LOAD=1 turns the static benchmark into a resilience stress test: a
- * concurrent INSERT/UPDATE/DELETE writer runs against the source THROUGH the
- * initial copy and streaming apply (so WAL retention, lag, and the now-armed
- * watchdog are actually exercised), writes are stopped before cutover, and
- * reconcile runs AFTER cutover at lag=0 with a ledger check proving zero
- * inflight loss. Tunables: WATCHDOG_MB (default 2048 under load), WRITE_INTERVAL_MS
- * (default 4), WRITE_AFTER_SEC (default 5 — extra streaming-apply load after copy).
+ * MODES (env flags):
+ *   (default)             static insert-only bulk copy + reconcile + cutover.
+ *   WRITE_LOAD=1          resilience test: a concurrent INSERT/UPDATE/DELETE
+ *                         writer on `documents` (+ no-PK UPDATE/DELETE churn on
+ *                         `audit`, REPLICA IDENTITY FULL) runs THROUGH the copy
+ *                         and streaming apply; writes stop before cutover;
+ *                         reconcile runs AFTER cutover at lag=0 with a ledger
+ *                         check proving zero inflight loss.
+ *   WATCHDOG_FIRE=1       NEGATIVE test: freeze apply + bloat source WAL; `watch`
+ *                         MUST abort via the WAL watchdog. Exits non-zero if not.
+ *   WRITE_THROUGH_CUTOVER=1  NEGATIVE test: keep writing through cutover; `cutover`
+ *                         MUST refuse (lag never drains). Exits non-zero if not.
+ *
+ * Tunables: WATCHDOG_MB (default 2048 under load, 8 in WATCHDOG_FIRE),
+ *   WRITE_INTERVAL_MS (default 4), WRITE_AFTER_SEC (default 5), BLOAT_ROWS (4000).
  */
 
 import { ConfigSchema, SecretsSchema } from "../src/config.ts";
-import { connect } from "../src/db.ts";
+import { connect, type Db } from "../src/db.ts";
 import { log } from "../src/log.ts";
 import { writer } from "../src/rehearsal/writer.ts";
 import { cutover } from "../src/steps/cutover.ts";
@@ -42,10 +50,15 @@ import { watch } from "../src/steps/watch.ts";
 import { createSchema, seedSource } from "./annoying-schema.ts";
 
 const ROWS = Number(process.env.ROWS ?? 1_000_000);
+const WATCHDOG_FIRE = process.env.WATCHDOG_FIRE === "1";
+const WRITE_THROUGH_CUTOVER = process.env.WRITE_THROUGH_CUTOVER === "1";
 const WRITE_LOAD = process.env.WRITE_LOAD === "1";
-const WATCHDOG_MB = Number(process.env.WATCHDOG_MB ?? (WRITE_LOAD ? 2048 : 50_000_000));
+const WATCHDOG_MB = Number(
+  process.env.WATCHDOG_MB ?? (WATCHDOG_FIRE ? 8 : WRITE_LOAD ? 2048 : 50_000_000),
+);
 const WRITE_INTERVAL_MS = Number(process.env.WRITE_INTERVAL_MS ?? 4);
 const WRITE_AFTER_SEC = Number(process.env.WRITE_AFTER_SEC ?? 5);
+const BLOAT_ROWS = Number(process.env.BLOAT_ROWS ?? 4000);
 const LEDGER_PATH = `ledger/scale-writer-${Date.now()}.log`;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -78,7 +91,51 @@ const secrets = SecretsSchema.parse({
 const since = (t0: number) => (performance.now() - t0) / 1000;
 const fmt = (s: number) => `${s.toFixed(1)}s`;
 
-async function main(): Promise<void> {
+/**
+ * Concurrent no-PK churn on `audit` (REPLICA IDENTITY FULL): INSERT unique rows,
+ * then UPDATE/DELETE random ones by ctid. Unique `detail` keeps FULL-identity
+ * apply unambiguous (no duplicate-row fan-out). Not ledger-tracked — reconcile's
+ * full-table hash proves correctness.
+ */
+async function auditChurn(
+  source: Db,
+  signal: AbortSignal,
+): Promise<{ ins: number; upd: number; del: number }> {
+  let ins = 0;
+  let upd = 0;
+  let del = 0;
+  let n = 0;
+  while (!signal.aborted) {
+    await source`INSERT INTO public.audit (actor, action, detail)
+                 VALUES (gen_random_uuid(), 'churn', ${`d-${Date.now()}-${n++}`})`;
+    ins++;
+    if (Math.random() < 0.3) {
+      await source`UPDATE public.audit SET action = 'edited'
+                   WHERE ctid = (SELECT ctid FROM public.audit ORDER BY random() LIMIT 1)`;
+      upd++;
+    }
+    if (Math.random() < 0.2) {
+      await source`DELETE FROM public.audit
+                   WHERE ctid IN (SELECT ctid FROM public.audit ORDER BY random() LIMIT 1)`;
+      del++;
+    }
+    await sleep(15);
+  }
+  return { ins, upd, del };
+}
+
+/** Shared setup: clean slate → schema on both → seed source → preflight → replicate. */
+async function prepare(source: Db, target: Db, seedRows: number): Promise<void> {
+  await teardown(source, target, cfg);
+  await createSchema(source);
+  await createSchema(target);
+  await seedSource(source, seedRows);
+  await preflight(source, target, cfg);
+  await replicate(source, target, cfg, secrets);
+}
+
+/** Default + WRITE_LOAD path: full migration with optional concurrent write load. */
+async function migration(): Promise<void> {
   const { source, target, close } = connect(secrets);
   log.toFile(`logs/scale-annoying-${ROWS}-${Date.now()}.log`);
   log.step(`pgshift scale run (annoying schema) — documents=${ROWS.toLocaleString()}`);
@@ -112,8 +169,8 @@ async function main(): Promise<void> {
   await replicate(source, target, cfg, secrets);
   const repS = since(tRep);
 
-  // WRITE_LOAD: start a concurrent INSERT/UPDATE/DELETE writer right after the
-  // slot+subscription exist, so it loads the source THROUGH the initial copy.
+  // WRITE_LOAD: start concurrent load right after the slot+subscription exist,
+  // so it loads the source THROUGH the initial copy.
   const ac = new AbortController();
   const writerP = WRITE_LOAD
     ? writer(source, {
@@ -123,6 +180,7 @@ async function main(): Promise<void> {
         trackRatio: 0.7,
       })
     : null;
+  const auditP = WRITE_LOAD ? auditChurn(source, ac.signal) : null;
 
   const tWatch = performance.now();
   await watch(source, target, cfg);
@@ -135,7 +193,10 @@ async function main(): Promise<void> {
     await sleep(WRITE_AFTER_SEC * 1000);
     ac.abort();
     const w = await writerP;
-    writeStats = `${w.inserts} ins / ${w.updates} upd / ${w.deletes} del (${w.tracked} tracked)`;
+    const a = (await auditP) ?? { ins: 0, upd: 0, del: 0 };
+    writeStats =
+      `documents ${w.inserts} ins / ${w.updates} upd / ${w.deletes} del (${w.tracked} tracked); ` +
+      `audit(no-PK) ${a.ins} ins / ${a.upd} upd / ${a.del} del`;
   }
 
   // Under load, reconcile is only authoritative AFTER cutover (lag drained to 0);
@@ -184,6 +245,95 @@ async function main(): Promise<void> {
   } else {
     log.ok("scale run complete — annoying schema reconciles clean");
   }
+}
+
+/**
+ * NEGATIVE test: freeze apply (DISABLE the subscription) and bloat the source
+ * WAL, then assert `watch` aborts via the WAL watchdog. Proves the safety valve
+ * actually fires, not just that it's configured.
+ */
+async function watchdogFireTest(): Promise<void> {
+  const { source, target, close } = connect(secrets);
+  log.toFile(`logs/scale-watchdog-fire-${Date.now()}.log`);
+  log.step(`WATCHDOG-FIRE test — watch must abort when slot retains > ${WATCHDOG_MB}MB`);
+
+  await prepare(source, target, Math.min(ROWS, 1000));
+
+  log.step("freeze apply (DISABLE subscription) + bloat source WAL with high-entropy rows");
+  await target.unsafe(`ALTER SUBSCRIPTION ${cfg.replication.subscription} DISABLE`);
+  // high-entropy payload (distinct md5s, not repeat()) so it does NOT TOAST-compress
+  // away — that is what actually advances the WAL past the frozen slot's restart_lsn.
+  await source.unsafe(
+    `INSERT INTO public.documents (content)
+     SELECT (SELECT string_agg(md5(random()::text), '') FROM generate_series(1, 400))
+     FROM generate_series(1, $1)`,
+    [BLOAT_ROWS],
+  );
+
+  let fired = false;
+  try {
+    await watch(source, target, cfg);
+    log.err("watch returned WITHOUT firing the WAL watchdog (test FAILED)");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    fired = /WAL watchdog/i.test(msg);
+    if (fired) log.ok(`watchdog fired as expected → ${msg}`);
+    else log.err(`watch threw, but not the watchdog → ${msg}`);
+  }
+
+  await teardown(source, target, cfg);
+  await close();
+  if (fired) log.ok("WATCHDOG-FIRE test passed — watch aborts on WAL bloat");
+  else process.exitCode = 1;
+}
+
+/**
+ * NEGATIVE test: keep writing to the source THROUGH cutover; assert `cutover`
+ * refuses (lag never drains within --max-lag-wait). Proves cutover fails closed
+ * when application writes were not actually stopped.
+ */
+async function cutoverRefusesTest(): Promise<void> {
+  const { source, target, close } = connect(secrets);
+  log.toFile(`logs/scale-cutover-refuses-${Date.now()}.log`);
+  log.step("CUTOVER-REFUSES test — cutover must fail while source writes continue");
+
+  await prepare(source, target, Math.min(ROWS, 50_000));
+
+  const ac = new AbortController();
+  // fast, continuous writes so confirmed_flush_lsn always trails current_wal_lsn
+  const writerP = writer(source, {
+    ledgerPath: LEDGER_PATH,
+    intervalMs: 1,
+    signal: ac.signal,
+    trackRatio: 0.7,
+  });
+
+  await watch(source, target, cfg); // initial copy completes; writer keeps going
+
+  let refused = false;
+  try {
+    // deliberately DO NOT stop the writer → lag cannot drain
+    await cutover(source, target, cfg, { maxLagWaitSec: 8 });
+    log.err("cutover COMPLETED despite ongoing source writes (test FAILED)");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    refused = /lag did not drain/i.test(msg);
+    if (refused) log.ok(`cutover refused as expected → ${msg}`);
+    else log.err(`cutover threw, but not the lag guard → ${msg}`);
+  }
+
+  ac.abort();
+  await writerP;
+  await teardown(source, target, cfg);
+  await close();
+  if (refused) log.ok("CUTOVER-REFUSES test passed — cutover fails closed under live writes");
+  else process.exitCode = 1;
+}
+
+async function main(): Promise<void> {
+  if (WATCHDOG_FIRE) await watchdogFireTest();
+  else if (WRITE_THROUGH_CUTOVER) await cutoverRefusesTest();
+  else await migration();
 }
 
 await main();
