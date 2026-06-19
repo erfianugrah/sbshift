@@ -1,7 +1,7 @@
 import type { Config, Secrets } from "../config.ts";
 import { classifyConn, connect, type Db } from "../db.ts";
 import { log } from "../log.ts";
-import { subscribeGrantSQL } from "./checks.ts";
+import { checkReplicationCapacity, subscribeGrantSQL } from "./checks.ts";
 
 /**
  * `doctor` — an automated, re-runnable readiness checklist.
@@ -321,6 +321,10 @@ async function targetChecks(
   else if (tgtNum < 160_000)
     s.warn("PG15 target + non-superuser — CREATE SUBSCRIPTION may be blocked; smoke-test it");
   else s.fail("target role lacks pg_create_subscription membership");
+
+  // replication-capacity GUCs (warn-only): slot/sender headroom on source, worker-process
+  // floor on target (the Azure Flexible Server "out of background worker slots" footgun).
+  if (sourceReachable) await checkReplicationCapacity(source, target, cfg, s);
 
   // non-default extensions present on source must be enabled on target before schema load
   if (sourceReachable) {

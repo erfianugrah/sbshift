@@ -1,7 +1,7 @@
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import { log } from "../log.ts";
-import { subscribeGrantSQL } from "./checks.ts";
+import { checkReplicationCapacity, subscribeGrantSQL } from "./checks.ts";
 
 /** Read-only checks that must pass before we touch anything. Throws on hard failures. */
 export async function preflight(source: Db, target: Db, cfg: Config): Promise<void> {
@@ -39,6 +39,13 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
   } else {
     log.ok("source wal_level=logical");
   }
+
+  // 2b. Replication-capacity GUCs (warn-only): slot/sender headroom on source,
+  //     worker-process floor on target (the Azure Flexible Server footgun).
+  await checkReplicationCapacity(source, target, cfg, {
+    ok: (m) => log.ok(m),
+    warn: (m) => log.warn(m),
+  });
 
   // 3. Target can CREATE SUBSCRIPTION (documented-supported, but verify the role grant).
   //    PG16+: needs pg_create_subscription membership; PG15: superuser only.

@@ -171,6 +171,35 @@ The replication engine is plain Postgres — the live integration suite runs it 
 The config defaults (`replication.slot`/`publication`/`subscription`) are generic names; set
 them to whatever your environment prefers in `migrate.config.yaml`.
 
+### Azure Database for PostgreSQL (Flexible Server)
+
+Azure Database for PostgreSQL — Flexible Server is plain Postgres 11–17, so it works as a
+source or target with **no code changes** — Microsoft's own minimal-downtime upgrade guide
+uses the exact `publication → slot → subscription` flow this tool automates. The Azure-specific
+prerequisites (all surfaced by `doctor`/`preflight` where checkable):
+
+- **Server parameters** (portal → Server parameters, then restart): `wal_level=logical`,
+  and on the **subscriber** `max_worker_processes >= 16`. Azure ships a low default and logical
+  apply/table-sync run as background workers — too few stalls the subscription with
+  `out of background worker slots`. Also bump `max_replication_slots` / `max_wal_senders` on
+  the source above the number of slots you'll run. `preflight` warns on all of these.
+- **Replication role:** `ALTER ROLE <user> WITH REPLICATION;` — and if it isn't the
+  server-admin account, also `GRANT azure_pg_admin TO <user>;` (plus `LOGIN`). Keep the
+  replication user separate from the admin per Azure guidance.
+- **Network:** the target's walreceiver must reach the source's direct host:5432 (firewall
+  rule / allowed Azure region IP ranges) — same reachability constraint as any direct-connection
+  pair (see the integration-test note on why `localhost` won't do).
+- **Unused-slot auto-drop:** at >=95% storage (or <5 GiB free) Azure flips the server to
+  read-only and **drops idle logical slots** to release WAL. That's a platform backstop on top
+  of this tool's own `watch` WAL watchdog — don't leave a slot without a live subscriber.
+- **HA-enabled source:** before PG17, logical slots are **not** preserved across an HA
+  failover (needs the PG Failover Slots extension; PG17 has native slot sync). If the source is
+  zone-redundant HA, expect to restart replication after a failover.
+
+> **Not** Azure SQL Database / Managed Instance — that's the SQL Server engine (T-SQL), a
+> heterogeneous migration with no Postgres logical replication. Different tool class entirely
+> (Azure DMS / schema conversion); out of scope here.
+
 ## Runbook
 
 **Full step-by-step procedure:
