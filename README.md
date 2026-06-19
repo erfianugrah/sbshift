@@ -35,6 +35,7 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 
 ## Gotchas encoded in the tool (so you don't re-learn them at 2am)
 
+- **Needs an ACTIVE source** → logical replication streams live WAL, so the source must be running with `wal_level=logical`. A **paused** project (especially one paused **> 90 days**, no longer restorable via Studio) cannot stream WAL — this tool does not apply; use the offline backup-download + restore path instead (see Prerequisites). This is a wrong-tool condition, not an in-flight hazard.
 - **`FOR ALL TABLES` needs superuser** → we always create an empty publication and `ADD TABLE` explicitly.
 - **`copy_data = true`** → the subscription does a consistent initial copy; no fragile `pg_dump --snapshot` dance (the SQL-created slot can't export a snapshot anyway).
 - **Generated columns** (e.g. `documents.search_vector`) are recomputed on the subscriber and are **excluded from the reconciliation hash** — hashing them causes false mismatches. They are **not free during the initial copy**: a heavy STORED generated column (a large `tsvector` over big text) is recomputed per row on the subscriber, and that CPU cost — not network/disk — bottlenecks the copy. Measured in the large rehearsal: **~11 MiB/s with the `search_vector` column vs ~80 MiB/s raw seed (~7× slower)**. For very large such columns, consider defining them as plain (non-generated) on the target during sync and converting to generated *after* the copy, or just budget the extra hours. `watch` now shows a live copy `%`.
