@@ -10,3 +10,8 @@ dump/
 schema_dump/
 migrate.config.yaml
 logs/
+.pgshift-test-creds
+
+# throwaway live-test config (points at ephemeral projects)
+migrate.test.yaml
+ledger.root/

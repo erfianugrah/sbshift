@@ -100,13 +100,28 @@ export async function doctor(
   const src = classifyConn(secrets.SOURCE_DB_URL);
   const tgt = classifyConn(secrets.TARGET_DB_URL);
   log.detail(`source conn ${src.host}:${src.port}   target conn ${tgt.host}:${tgt.port}`);
-  if (src.isPooler)
-    warn(
-      "SOURCE_DB_URL is a POOLER endpoint — fine for these read-only checks, but the replication " +
-        "subscription's CONNECTION must be the DIRECT host (db.<ref>.supabase.co); the pooler can't stream WAL.",
-    );
-  else if (src.isSupabaseDirect)
+  const repl = secrets.SOURCE_REPLICATION_URL ? classifyConn(secrets.SOURCE_REPLICATION_URL) : null;
+  if (src.isPooler) {
+    if (repl?.isSupabaseDirect)
+      ok(
+        `SOURCE_DB_URL is a pooler (admin/seed/reconcile), but SOURCE_REPLICATION_URL is the ` +
+          `direct host (ref ${repl.ref}) — the subscription will stream from there. Correct split ` +
+          `for running pgshift from a host without IPv6 to the direct host.`,
+      );
+    else if (repl)
+      fail(
+        "SOURCE_DB_URL is a pooler AND SOURCE_REPLICATION_URL is not a direct host — the " +
+          "subscription's CONNECTION must be the DIRECT host (db.<ref>.supabase.co); the pooler can't stream WAL.",
+      );
+    else
+      warn(
+        "SOURCE_DB_URL is a POOLER endpoint — fine for these read-only checks, but the replication " +
+          "subscription's CONNECTION must be the DIRECT host (db.<ref>.supabase.co); the pooler can't " +
+          "stream WAL. Set SOURCE_REPLICATION_URL to the source direct host.",
+      );
+  } else if (src.isSupabaseDirect) {
     ok(`SOURCE_DB_URL is the direct host (ref ${src.ref}) — correct for replication`);
+  }
   if (!opts.sourceOnly) {
     if (tgt.isPooler)
       warn("TARGET_DB_URL is a POOLER endpoint — CREATE SUBSCRIPTION needs the direct host");

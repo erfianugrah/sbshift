@@ -89,11 +89,12 @@ export function connect(
 
 /**
  * The libpq-style CONNECTION string the TARGET subscription uses to reach the
- * SOURCE. Derived from SOURCE_DB_URL so we never hand-maintain two formats.
+ * SOURCE. Uses SOURCE_REPLICATION_URL when set (the source DIRECT host, required
+ * because the pooler can't stream WAL), else SOURCE_DB_URL.
  *
  * sslmode defaults to `require` (Supabase mandates TLS), but is overridable via
- * an `?sslmode=` query param on SOURCE_DB_URL so the integration tier can point
- * at a plain (non-TLS) Postgres with `?sslmode=disable`.
+ * an `?sslmode=` query param so the integration tier can point at a plain
+ * (non-TLS) Postgres with `?sslmode=disable`.
  */
 /** What kind of endpoint a connection string points at — drives doctor warnings. */
 export interface ConnInfo {
@@ -121,7 +122,7 @@ export function classifyConn(url: string): ConnInfo {
 }
 
 export function sourceConnString(secrets: Secrets): string {
-  const u = new URL(secrets.SOURCE_DB_URL);
+  const u = new URL(secrets.SOURCE_REPLICATION_URL ?? secrets.SOURCE_DB_URL);
   const sslmode = u.searchParams.get("sslmode") || "require";
   const parts = [
     `host=${u.hostname}`,

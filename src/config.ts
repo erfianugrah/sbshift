@@ -83,10 +83,19 @@ export type Config = z.infer<typeof ConfigSchema>;
 
 /** Secrets never live in the YAML — they come from the environment. */
 export const SecretsSchema = z.object({
-  /** Direct connection string for the SOURCE db (port 5432, NOT the pooler). */
+  /** Connection string for the SOURCE db used by pgshift's own admin/seed/reconcile
+   *  queries. Normally the direct host; may be the IPv4 pooler when running from a
+   *  host without IPv6 to the direct host (then set SOURCE_REPLICATION_URL too). */
   SOURCE_DB_URL: z.string().url(),
-  /** Direct connection string for the TARGET db (port 5432, NOT the pooler). */
+  /** Connection string for the TARGET db (admin queries + CREATE SUBSCRIPTION). */
   TARGET_DB_URL: z.string().url(),
+  /** OPTIONAL override for the subscription's CONNECTION string (the one the TARGET's
+   *  walreceiver dials to stream WAL). MUST be the source DIRECT host — the pooler
+   *  cannot stream logical replication. Set this when SOURCE_DB_URL is a pooler
+   *  (e.g. running pgshift from a host with no IPv6 route to the direct host); the
+   *  target reaches the direct host over Supabase's internal network regardless.
+   *  Falls back to SOURCE_DB_URL when unset. */
+  SOURCE_REPLICATION_URL: z.string().url().optional(),
   /** Supabase personal access token (sbp_...) for the Management API. */
   SUPABASE_ACCESS_TOKEN: z.string().startsWith("sbp_").optional(),
 });
