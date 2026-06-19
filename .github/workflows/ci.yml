@@ -25,6 +25,42 @@ jobs:
 
       # Unit suite only. The live integration tier (test/integration.test.ts)
       # self-skips without TEST_SOURCE_DB_URL / TEST_TARGET_DB_URL, so it is a
-      # no-op here; run it locally via `bun run test:integration` (needs Docker).
+      # no-op here; the `integration` job below runs it under real Postgres.
       - name: Unit tests
         run: bun test
+
+  # Real logical replication against a throwaway Postgres pair (Docker), plus the
+  # negative-path safety-gate assertions. ubuntu-latest ships docker + compose v2.
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Live replication + fault injection (lose-row, corrupt-row, drop-replica-identity,
+      # generated-col exclusion). Stands up + tears down its own compose network.
+      - name: Integration tier
+        run: bash scripts/test-integration.sh
+
+      # Safety gates must FIRE, not just exist. Each harness mode exits non-zero if its
+      # gate does not trip, so a green step is proof the gate works. Small ROWS for speed.
+      - name: 'Safety gate: concurrent write load (reconcile must pass, ledger clean)'
+        run: |
+          docker compose -f docker-compose.test.yml run --rm \
+            -e ROWS=20000 -e WRITE_LOAD=1 -e WRITE_INTERVAL_MS=2 -e WRITE_AFTER_SEC=4 runner \
+            sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
+
+      - name: 'Safety gate: WAL watchdog must abort on bloat'
+        run: |
+          docker compose -f docker-compose.test.yml run --rm \
+            -e ROWS=1000 -e WATCHDOG_FIRE=1 -e WATCHDOG_MB=8 -e BLOAT_ROWS=4000 runner \
+            sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
+
+      - name: 'Safety gate: cutover must refuse under live writes'
+        run: |
+          docker compose -f docker-compose.test.yml run --rm \
+            -e ROWS=20000 -e WRITE_THROUGH_CUTOVER=1 runner \
+            sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
+
+      - name: Tear down compose
+        if: always()
+        run: docker compose -f docker-compose.test.yml down -v --remove-orphans

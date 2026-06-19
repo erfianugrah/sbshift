@@ -351,6 +351,38 @@ The tier stands up real logical replication and asserts each fault is caught: ha
 reconcile clean, `lose-row` → reconcile fails, `corrupt-row` → reconcile fails, generated
 column excluded (clean data still reconciles), and `drop-replica-identity` → `preflight` rejects.
 
+### Scale + safety-gate harness (Docker)
+
+`test/scale.harness.ts` builds the deliberately *annoying* 4-table schema (STORED `tsvector`
+gen-column, IDENTITY + composite + no-PK tables, inter-table FKs, GUC-sensitive types,
+unicode/NULLs), seeds it to volume, and runs the real pipeline with per-phase timing. Three
+modes, selected by env flag — each exits non-zero if its expected gate does **not** fire, so
+they double as CI assertions:
+
+```bash
+bun run test:scale         # default: static insert-only bulk copy + reconcile + cutover (ROWS=1M)
+
+# WRITE_LOAD: concurrent INSERT/UPDATE/DELETE on documents + no-PK UPDATE/DELETE churn on the
+# REPLICA IDENTITY FULL audit table run THROUGH the copy + streaming apply; writes stop before
+# cutover; reconcile runs after cutover at lag=0 with a ledger inflight-loss check.
+docker compose -f docker-compose.test.yml run --rm \
+  -e ROWS=200000 -e WRITE_LOAD=1 runner \
+  sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
+
+# WATCHDOG_FIRE (negative): freeze apply + bloat source WAL → `watch` MUST abort via the WAL watchdog
+# WRITE_THROUGH_CUTOVER (negative): keep writing through cutover → `cutover` MUST fail (lag never drains)
+```
+
+| Mode | What it stresses | Gate that must fire |
+|---|---|---|
+| (default) | initial COPY of the annoying schema at volume | reconcile PASSES |
+| `WRITE_LOAD=1` | concurrent writes + no-PK FULL-identity apply through copy/stream | reconcile PASSES, ledger clean |
+| `WATCHDOG_FIRE=1` | frozen apply bloating source WAL | `watch` → WAL watchdog abort |
+| `WRITE_THROUGH_CUTOVER=1` | writes never stopped at cutover | `cutover` → "lag did not drain" |
+
+The two negative modes are the at-scale complement to the `rehearse chaos` table above: same
+gates (`watch` watchdog, `cutover` lag-drain guard), proven to abort under real load.
+
 ## Possible future backend: pgcopydb
 
 `pgcopydb clone --follow` does parallel initial copy + snapshot-consistent catch-up and is

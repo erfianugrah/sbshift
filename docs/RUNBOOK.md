@@ -91,6 +91,38 @@ bun run test:integration   # needs Docker; ~6s
 For a scale rehearsal that emulates real on-disk size + live write load, see the README
 **Rehearsal** section (`bun start rehearse seed-size` / `rehearse writer` / `rehearse run`).
 
+### Validating the safety gates (prove they FIRE, not just that they exist)
+
+Before trusting a real migration, confirm the data-plane gates actually abort when they
+should. The scale harness (`test/scale.harness.ts`) has three modes, selected by env flag,
+all against a throwaway docker PG pair (no managed project, $0):
+
+```bash
+# positive path — concurrent INSERT/UPDATE/DELETE on documents AND no-PK UPDATE/DELETE
+# churn on the REPLICA IDENTITY FULL audit table run THROUGH the initial copy + streaming
+# apply; writes stop before cutover; reconcile runs after cutover at lag=0 with a ledger
+# inflight-loss check. EXPECT: RECONCILE PASSED, ledger clean.
+docker compose -f docker-compose.test.yml run --rm \
+  -e ROWS=200000 -e WRITE_LOAD=1 -e WRITE_INTERVAL_MS=2 -e WRITE_AFTER_SEC=6 runner \
+  sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
+
+# NEGATIVE — freeze apply + bloat source WAL. EXPECT: `watch` aborts via the WAL watchdog
+# ("slot retains NN MB > 8 MB limit"); harness exits 0 only because the gate fired.
+docker compose -f docker-compose.test.yml run --rm \
+  -e ROWS=1000 -e WATCHDOG_FIRE=1 -e WATCHDOG_MB=8 runner \
+  sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
+
+# NEGATIVE — keep writing through cutover. EXPECT: `cutover` fails closed
+# ("lag did not drain in time"); proves cutover refuses when writes were not stopped.
+docker compose -f docker-compose.test.yml run --rm \
+  -e ROWS=50000 -e WRITE_THROUGH_CUTOVER=1 runner \
+  sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
+```
+
+Each harness exits non-zero if the expected gate does **not** fire, so they double as CI
+assertions (see `.github/workflows/ci.yml`). This is the negative-path complement to the
+README's `rehearse chaos` table — same gates, exercised at scale.
+
 ---
 
 ## 4. Create the target project  ← THE ONLY BILLABLE STEP (Supabase)
