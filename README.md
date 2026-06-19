@@ -131,6 +131,46 @@ bun start config-sync
 bun start teardown
 ```
 
+## Autonomous runs (CI / Lambda / cron)
+
+The orchestration lives in the tool, not in a wrapper script. `run` executes the
+pipeline end-to-end with machine-readable output and a meaningful exit code;
+`status` is a one-shot health snapshot for a scheduled watcher.
+
+```bash
+# one command, non-interactive; exit 0 iff preflight+replicate+watch+reconcile all pass
+bun start run --through reconcile --json
+
+# cutover is destructive and REFUSED unless you assert source writes are stopped:
+bun start run --through cutover --confirm-writes-stopped
+
+# poll-once snapshot for a watcher; --require-synced exits non-zero until ready:
+bun start status --json
+bun start status --require-synced    # use in a wait loop
+```
+
+With `--json`, `run` emits NDJSON on stdout (`phase_start` / `phase_end` /
+`summary`) while human logs go to stderr, so stdout stays parseable. Example
+GitHub Action (the runner must reach the **direct** hosts — IPv6 or the IPv4
+add-on, see the connection note above):
+
+```yaml
+name: migrate
+on: { workflow_dispatch: {} }
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun start run --through reconcile --json
+        env:
+          SOURCE_DB_URL: ${{ secrets.SOURCE_DB_URL }}
+          TARGET_DB_URL: ${{ secrets.TARGET_DB_URL }}
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+```
+
 ## Rehearsal (test the whole thing on a throwaway project pair first)
 
 Theory passing at 1M rows proves nothing — the failures that matter (slow initial copy holding

@@ -274,6 +274,8 @@ forward, not back.
 
 | Command | What it does |
 |---|---|
+| `bun start run [--through P] [--json] [--confirm-writes-stopped]` | autonomous pipeline (preflight→replicate→watch→reconcile[→cutover]); exit 0 iff the requested range passed. For CI/Lambda. |
+| `bun start status [--json] [--require-synced]` | one-shot replication snapshot (sub state, srsubstate, slot active, WAL retained, lag) for a scheduled watcher |
 | `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded) |
 | `bun start preflight` | read-only hard-gate checks; throws on failure |
 | `bun start replicate` | publication + slot + subscription (starts initial copy) |
@@ -284,6 +286,7 @@ forward, not back.
 | `bun start config-sync [--dry-run]` | copy non-data config via Management API (secrets stripped) |
 | `bun start functions [--dry-run]` | transfer Edge Functions (N/A for example-app) |
 | `bun start storage <localDir> [--dry-run]` | push storage objects (N/A for example-app) |
+| `bun start rehearse run --gib N --payload B [--chaos S --chaos-arg T]` | full scale rehearsal in-tool: seed-to-size → run → fault gate → teardown (THROWAWAY pair) |
 | `bun run test:integration` | live replication/reconcile against a throwaway Postgres pair |
 
 All commands take `-c <path>` for an alternate config (default `migrate.config.yaml`).
