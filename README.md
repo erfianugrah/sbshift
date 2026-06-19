@@ -57,6 +57,17 @@ A cross-region migration is ~7 independent workstreams. Most are already covered
 Node.js is **not** required. The replication host must be able to reach the **direct**
 Postgres hosts (IPv6, or the IPv4 add-on) — see the connection note below.
 
+> **This tool needs an ACTIVE source.** Logical replication streams live WAL, so the source
+> must be running with `wal_level=logical`. If your source project is **paused** — and
+> especially if it has been paused **> 90 days** (no longer restorable via Studio) — it cannot
+> stream WAL and this tool does not apply. Use Supabase's offline path instead: download the
+> database backup + Storage objects from Project Overview and restore them into a new project
+> ([Restore project after 90-day pause](https://supabase.com/docs/guides/troubleshooting/restore-project-after-90-days-pause)).
+> That path reuses the same building blocks this tool wraps: `supabase storage cp` for
+> objects (identical syntax to our `storage` command) and the `sync_supabase_config.sh`
+> Management-API config copy (which our `config-sync` is a TS port of), so `config-sync`,
+> `functions`, and `storage` here remain useful even on the backup-restore route.
+
 Runtime dependencies (installed by `bun install`): `commander` (CLI), `postgres` (the pg
 client), `yaml` (config), `zod` (config validation). Dev: `@biomejs/biome`, `typescript`,
 `@types/bun`.
