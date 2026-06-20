@@ -110,6 +110,10 @@ export interface ConnInfo {
   port: number;
   /** Supavisor pooler host (…​.pooler.supabase.com) — CANNOT stream logical replication. */
   isPooler: boolean;
+  /** Supavisor TRANSACTION-mode pooler (port 6543) — also breaks `pg_dump`/`pg_dumpall`
+   *  (no session-level features), so it's unusable as `bootstrap`'s dump source. The
+   *  session pooler (5432) is fine for dumps. */
+  isTransactionPooler: boolean;
   /** Direct Supabase host (db.<ref>.supabase.co) — IPv6-only unless the IPv4 add-on is on. */
   isSupabaseDirect: boolean;
   /** project ref, when the host is a direct Supabase host. */
@@ -124,6 +128,8 @@ export function classifyConn(url: string): ConnInfo {
     host,
     port: Number(u.port || "5432"),
     isPooler: /(^|\.)pooler\.supabase\.com$/i.test(host),
+    isTransactionPooler:
+      /(^|\.)pooler\.supabase\.com$/i.test(host) && Number(u.port || "5432") === 6543,
     isSupabaseDirect: Boolean(m),
     ref: m?.[1],
   };

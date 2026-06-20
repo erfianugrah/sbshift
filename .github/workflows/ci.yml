@@ -36,10 +36,39 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       # Live replication + fault injection (lose-row, corrupt-row, drop-replica-identity,
       # generated-col exclusion). Stands up + tears down its own compose network.
       - name: Integration tier
         run: bash scripts/test-integration.sh
+
+      # Bootstrap tier: REAL pg_dumpall/pg_dump/psql. Unlike replication it only
+      # dumps from the source URL and restores to the target URL (no walreceiver
+      # cross-container dial), so two published-port containers + the host's bun
+      # and pg client are enough. postgresql-client must be >= the server major
+      # (16) or pg_dump refuses. Exercises BOTH the generic path and the forced
+      # Supabase-filter path (filterSupabaseRoles / filterSupabaseSchema).
+      - name: Bootstrap tier (real pg_dump/psql)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          bun install --frozen-lockfile
+          docker run -d --name boot-src -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:16 -c wal_level=logical
+          docker run -d --name boot-tgt -e POSTGRES_PASSWORD=pw -p 55433:5432 postgres:16
+          export TEST_SOURCE_DB_URL="postgresql://postgres:pw@127.0.0.1:55432/postgres"
+          export TEST_TARGET_DB_URL="postgresql://postgres:pw@127.0.0.1:55433/postgres"
+          for u in "$TEST_SOURCE_DB_URL" "$TEST_TARGET_DB_URL"; do
+            for i in $(seq 1 60); do psql "$u" -tAc 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
+          done
+          psql --version
+          bun test test/bootstrap.integration.test.ts
+
+      - name: Bootstrap tier teardown
+        if: always()
+        run: docker rm -f boot-src boot-tgt || true
 
       # Safety gates must FIRE, not just exist. Each harness mode exits non-zero if its
       # gate does not trip, so a green step is proof the gate works. Small ROWS for speed.

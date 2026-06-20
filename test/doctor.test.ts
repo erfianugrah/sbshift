@@ -24,6 +24,22 @@ describe("classifyConn", () => {
     expect(c.ref).toBeUndefined();
   });
 
+  test("session pooler (5432) is NOT a transaction pooler — dumps are fine", () => {
+    const c = classifyConn(
+      "postgresql://postgres.ref:pw@aws-1-eu-central-1.pooler.supabase.com:5432/postgres",
+    );
+    expect(c.isPooler).toBe(true);
+    expect(c.isTransactionPooler).toBe(false);
+  });
+
+  test("transaction pooler (6543) flagged — pg_dump would break over it", () => {
+    const c = classifyConn(
+      "postgresql://postgres.ref:pw@aws-1-eu-central-1.pooler.supabase.com:6543/postgres",
+    );
+    expect(c.isPooler).toBe(true);
+    expect(c.isTransactionPooler).toBe(true);
+  });
+
   test("defaults port to 5432 when absent", () => {
     expect(classifyConn("postgresql://u:p@localhost/postgres").port).toBe(5432);
   });

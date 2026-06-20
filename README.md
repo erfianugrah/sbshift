@@ -419,7 +419,10 @@ ephemeral `postgres:16` containers (source `wal_level=logical`) plus a bun runne
 compose network**, runs `test/integration.test.ts`, and tears it all down. It asserts each fault
 is caught: happy-path reconcile clean, `lose-row` → reconcile fails, `corrupt-row` → reconcile
 fails, generated column excluded (clean data still reconciles), `drop-replica-identity` →
-`preflight` rejects.
+`preflight` rejects. It also exercises the live `cutover` sequence-resync (proving **every** owned
+sequence is set forward, not just the first), `replicate`'s `REFRESH PUBLICATION` pickup of a
+table added after the subscription, and `doctor`'s ready / not-ready verdicts on a clean vs
+missing-schema pair.
 
 > **Why a shared network, not two bare `docker run`s with `localhost`:** `replicate.ts` uses one
 > connection string both for its own libpq connection and as the subscription's `CONNECTION`,

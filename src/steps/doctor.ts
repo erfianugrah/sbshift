@@ -140,6 +140,12 @@ export async function doctor(
           "subscription's CONNECTION must be the DIRECT host (db.<ref>.supabase.co); the pooler can't " +
           "stream WAL. Set SOURCE_REPLICATION_URL to the source direct host.",
       );
+    if (src.isTransactionPooler)
+      fail(
+        "SOURCE_DB_URL is the TRANSACTION pooler (port 6543) — `bootstrap` runs pg_dump/pg_dumpall " +
+          "against it and the transaction pooler has no session-level features, so the dump fails. " +
+          "Use the SESSION pooler (port 5432) for SOURCE_DB_URL.",
+      );
   } else if (src.isSupabaseDirect) {
     ok(`SOURCE_DB_URL is the direct host (ref ${src.ref}) — correct for replication`);
   }

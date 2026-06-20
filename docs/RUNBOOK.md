@@ -221,6 +221,18 @@ live. Add any such schedule explicitly **after** cutover in step 9d. Prefer the 
 
 For a non-Supabase pair, replace the `supabase db dump` calls with ordinary
 `pg_dumpall --roles-only` + `pg_dump --schema-only`, and there is no `auth` schema to restore.
+(`bootstrap` does this automatically — it skips the managed-schema/role filters for a
+non-Supabase source.)
+
+**Firewall / network reachability (non-Supabase or self-managed source).** The subscription's
+WAL stream is dialed *by the target's walreceiver*, not from your laptop — so the **source**
+must accept inbound connections from the **target's egress IPs** on the Postgres port, and (if
+the source enforces it) `pg_hba.conf` must permit the replication role from those IPs. Supabase→
+Supabase sidesteps this (the dial goes over Supabase's internal network), but for an Azure /
+self-hosted / cloud source you must allowlist the subscriber's egress IPs first, or
+`CREATE SUBSCRIPTION` connects but the stream never starts. (Azure: *Server → Networking →
+Firewall rules*; capture the target host's outbound IPs and add one rule per IP.) Likewise
+`pg_dump`/`pg_dumpall` for the pre-step must reach the source from wherever you run `bootstrap`.
 
 ---
 
@@ -486,6 +498,7 @@ project becomes a cold standby.
 | `bun start status [--json] [--require-synced]` | one-shot replication snapshot (sub state, srsubstate, slot active, WAL retained, lag) for a scheduled watcher |
 | `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded, custom `pg_db_role_setting` GUC overrides) |
 | `bun start preflight` | read-only hard-gate checks; throws on failure |
+| `bun start bootstrap [--confirm] [--all-schemas] [--out-dir P]` | prepare the TARGET: enable extensions + restore roles + schema from source (Supabase-aware role/schema filter); preview unless `--confirm` |
 | `bun start replicate` | publication + slot + subscription (starts initial copy) |
 | `bun start watch` | poll initial-sync state + WAL-bloat watchdog |
 | `bun start reconcile [--mode chunked\|full] [--buckets N] [--max-examples N]` | checksum source vs target |

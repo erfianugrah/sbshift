@@ -53,12 +53,14 @@ function buildSecrets(): Secrets {
 
 async function createSchema(db: Db): Promise<void> {
   await db.unsafe(`DROP TABLE IF EXISTS ${TABLE} CASCADE`);
-  // includes a STORED generated column to exercise the reconcile exclusion path
-  // seq_id (bigserial) gives the table an OWNED sequence so the cutover
-  // sequence-resync path has something to discover + setval.
+  // includes a STORED generated column to exercise the reconcile exclusion path.
+  // seq_id + seq_id2 (bigserial) give the table TWO owned sequences so the cutover
+  // resync path is exercised with N>1 (it must discover + setval EVERY sequence
+  // owned by a replicated table, not just the first).
   await db.unsafe(`CREATE TABLE ${TABLE} (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     seq_id bigserial,
+    seq_id2 bigserial,
     content text,
     n int,
     g tsvector GENERATED ALWAYS AS (to_tsvector('simple', coalesce(content, ''))) STORED
@@ -150,19 +152,23 @@ d("live replication + reconciliation", () => {
     expect(r.fail).toBeGreaterThan(0);
   }, 60_000);
 
-  test("cutover: owned sequence is resynced to the source value on the target", async () => {
+  test("cutover: EVERY owned sequence is resynced to the source value on the target", async () => {
     await resetAndSync(200);
-    // The source seq advanced to 200 on insert; replicated rows carry literal
-    // values so the TARGET sequence never advanced. Confirm the gap exists...
-    const seqName = `${TABLE}_seq_id_seq`;
-    const [tBefore] = await target.unsafe(`SELECT last_value, is_called FROM ${seqName}`);
-    expect(tBefore?.is_called === false || Number(tBefore?.last_value) < 200).toBe(true);
-    // ...then cutover (writes are stopped, lag drains) must setval it forward.
+    // Both source seqs advanced to 200 on insert; replicated rows carry literal
+    // values so the TARGET sequences never advanced. Confirm the gap exists on both...
+    const seqNames = [`${TABLE}_seq_id_seq`, `${TABLE}_seq_id2_seq`];
+    for (const seqName of seqNames) {
+      const [tBefore] = await target.unsafe(`SELECT last_value, is_called FROM ${seqName}`);
+      expect(tBefore?.is_called === false || Number(tBefore?.last_value) < 200).toBe(true);
+    }
+    // ...then cutover (writes are stopped, lag drains) must setval BOTH forward.
     await cutover(source, target, cfg, { maxLagWaitSec: 30 });
-    const [s] = await source.unsafe(`SELECT last_value FROM ${seqName}`);
-    const [t] = await target.unsafe(`SELECT last_value, is_called FROM ${seqName}`);
-    expect(Number(t?.last_value)).toBe(Number(s?.last_value));
-    expect(t?.is_called).toBe(true);
+    for (const seqName of seqNames) {
+      const [s] = await source.unsafe(`SELECT last_value FROM ${seqName}`);
+      const [t] = await target.unsafe(`SELECT last_value, is_called FROM ${seqName}`);
+      expect(Number(t?.last_value)).toBe(Number(s?.last_value));
+      expect(t?.is_called).toBe(true);
+    }
   }, 60_000);
 
   test("replicate: REFRESH PUBLICATION picks up a table added after the subscription", async () => {
