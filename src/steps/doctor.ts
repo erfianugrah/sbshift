@@ -1,6 +1,7 @@
 import type { Config, Secrets } from "../config.ts";
 import { classifyConn, connect, type Db } from "../db.ts";
 import { log } from "../log.ts";
+import { extensionStatements, missingExtensions } from "./bootstrap.ts";
 import {
   checkCustomPostgresConfig,
   checkReplicationCapacity,
@@ -52,6 +53,20 @@ export function externalDeps(fks: Fk[], replicated: string[]): string[] {
     if (set.has(f.table) && !set.has(f.references)) out.add(f.references);
   }
   return [...out].sort();
+}
+
+/**
+ * Pure: the runnable dump/restore command for the cross-schema dependencies a
+ * replicated table FKs into (the `auth.users` trap). Their ROW data must exist
+ * on the target before the initial copy. Returns the exact `supabase db dump`
+ * one-liner so the operator doesn't reconstruct it from prose.
+ */
+export function externalDepDumpCommand(deps: string[]): string {
+  const schemas = [...new Set(deps.map((d) => d.split(".")[0]))].sort();
+  return (
+    `supabase db dump --db-url "$SOURCE_DB_URL" --data-only --schema ${schemas.join(",")} -f predeps.sql && ` +
+    `psql "$TARGET_DB_URL" --command 'SET session_replication_role = replica' -f predeps.sql`
+  );
 }
 
 /** Pure: compare a reconcile table's pinned hashColumns against the live schema. */
@@ -277,6 +292,7 @@ async function sourceChecks(source: Db, cfg: Config, s: Sink): Promise<void> {
           `before the initial copy, or FK enforcement rejects the rows. Migrate ${d.split(".")[0]} ` +
           `via dump/restore (supabase db dump) first.`,
       );
+    log.detail(`fix: ${externalDepDumpCommand(deps)}`);
   }
 
   // stale leftovers from a prior run
@@ -342,16 +358,19 @@ async function targetChecks(
       source`SELECT extname FROM pg_extension`,
       target`SELECT extname FROM pg_extension`,
     ]);
-    const tgtSet = new Set(tgtExt.map((e) => String(e.extname)));
-    const missing = srcExt
-      .map((e) => String(e.extname))
-      .filter((e) => !IGNORE.has(e) && !tgtSet.has(e))
-      .sort();
-    missing.length === 0
-      ? s.ok("target has all source extensions")
-      : s.warn(
-          `target missing source extensions (enable before schema load): ${missing.join(", ")}`,
-        );
+    // missingExtensions already excludes built-ins (plpgsql); keep IGNORE for any
+    // doctor-specific additions but defer the core filter to the shared helper.
+    const missing = missingExtensions(
+      srcExt.map((e) => String(e.extname)).filter((e) => !IGNORE.has(e)),
+      tgtExt.map((e) => String(e.extname)),
+    );
+    if (missing.length === 0) {
+      s.ok("target has all source extensions");
+    } else {
+      s.warn(`target missing source extensions (enable before schema load): ${missing.join(", ")}`);
+      for (const stmt of extensionStatements(missing)) log.detail(`fix: ${stmt}`);
+      log.detail("or run: pgshift bootstrap --confirm (enables these + restores roles + schema)");
+    }
   }
 
   // is the schema loaded on the target yet? (logical replication does NOT carry DDL)

@@ -9,6 +9,7 @@ import { runChaos, SCENARIOS, type ScenarioName } from "./rehearsal/chaos.ts";
 import { rehearseRun } from "./rehearsal/orchestrate.ts";
 import { seed, seedToSize } from "./rehearsal/seed.ts";
 import { writer } from "./rehearsal/writer.ts";
+import { bootstrap } from "./steps/bootstrap.ts";
 import { claim } from "./steps/claim.ts";
 import { transferFunctions, transferStorage } from "./steps/cli-wrappers.ts";
 import { configSync } from "./steps/config-sync.ts";
@@ -134,6 +135,33 @@ program
         process.exitCode = 1;
       });
   });
+
+program
+  .command("bootstrap")
+  .description(
+    "prepare the TARGET before replicate: enable extensions + restore roles + schema from source (preview unless --confirm)",
+  )
+  .option(
+    "--confirm",
+    "actually apply (MUTATES THE TARGET: enables extensions, restores roles + schema); default: preview only",
+    false,
+  )
+  .option("--out-dir <path>", "directory for the dumped roles/schema SQL", "ledger")
+  .option(
+    "--all-schemas",
+    "dump EVERY schema (default: a Supabase source excludes auth/storage/etc., which already exist on the target)",
+    false,
+  )
+  .action((o) =>
+    withDb(async ({ source, target }, cfg) => {
+      const r = await bootstrap(source, target, cfg, loadSecrets(), {
+        confirm: Boolean(o.confirm),
+        outDir: o.outDir,
+        allSchemas: Boolean(o.allSchemas),
+      });
+      if (!r.ok) process.exitCode = 1;
+    }),
+  );
 
 program
   .command("preflight")

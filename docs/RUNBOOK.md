@@ -174,6 +174,16 @@ schemas. Any FK from a replicated table into `auth.users` means the **referenced
 must exist on the target before the copy**, or every child row is rejected. Connection here
 can be the **pooler** (read for dump, write for restore) — direct is not required for this step.
 
+> **Preferred: `bun start bootstrap --confirm`.** It does 6a–6c for the roles + schema +
+> extensions automatically, **without Docker** (the `supabase db dump` path below shells
+> `pg_dump` inside a version-matched container). For a Supabase source it auto-excludes the
+> managed schemas and filters the reserved roles (`anon`/`supabase_*`/`postgres`/…) exactly
+> like `supabase db dump`, so you never hit the `supabase_admin` ownership / `cli_login_postgres`
+> grant errors the manual path warns about below. `bootstrap` does **not** do the `auth` ROW
+> data (6a's `auth.sql`) — that one step stays manual (see step 6d / the FK-trap command
+> `doctor` prints). The manual `supabase db dump` flow below remains the fallback when you
+> can't run the system `pg_dump`/`pg_dumpall`.
+
 ```bash
 SRC="<SOURCE_POOLER_OR_DIRECT_URL>"
 TGT="<TARGET_POOLER_URL>"

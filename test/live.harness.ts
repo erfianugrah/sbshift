@@ -17,6 +17,7 @@ import { ConfigSchema, SecretsSchema } from "../src/config.ts";
 import { connect } from "../src/db.ts";
 import { log } from "../src/log.ts";
 import { MgmtApi } from "../src/mgmt.ts";
+import { bootstrap } from "../src/steps/bootstrap.ts";
 import { cutover } from "../src/steps/cutover.ts";
 import { doctor } from "../src/steps/doctor.ts";
 import { preflight } from "../src/steps/preflight.ts";
@@ -97,8 +98,22 @@ async function main(): Promise<void> {
     const { source, target, close } = connect(secrets);
 
     try {
-      log.step("loading annoying schema on both projects");
-      await Promise.all([createSchema(source), createSchema(target)]);
+      log.step("loading annoying schema on the SOURCE");
+      await createSchema(source);
+
+      // Prepare the target via the REAL bootstrap pre-step (not a direct
+      // createSchema) so the Supabase-aware path — exclude managed schemas,
+      // filter reserved roles, enable citext — is exercised end-to-end against
+      // a real Supabase target. Schema-only; replicate carries the rows.
+      log.step("bootstrap target (extensions + roles + schema, Supabase-aware)");
+      const boot = await bootstrap(source, target, cfg, secrets, {
+        confirm: true,
+        outDir: "/tmp/pgshift-live-bootstrap",
+      });
+      if (!boot.ok) throw new Error("bootstrap FAILED");
+      const [tgtHasUsers] = await target`SELECT to_regclass('public.users') IS NOT NULL AS ok`;
+      if (!tgtHasUsers?.ok) throw new Error("bootstrap did not create public.users on target");
+      log.ok(`bootstrap applied ${boot.applied}/${boot.planned} steps; target schema present`);
 
       log.step(`seeding source (${ROWS.toLocaleString()} documents + deps)`);
       await seedSource(source, ROWS);

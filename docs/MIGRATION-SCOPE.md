@@ -30,10 +30,10 @@ These live in Postgres, so any data-plane method moves them — but with caveats
 
 | Artifact | Carrier | Caveat |
 |---|---|---|
-| Schema (tables, views, functions, procedures, triggers) | `schema.sql` / clone | pgshift logical repl carries **data only** — you load schema first (pre-step) |
+| Schema (tables, views, functions, procedures, triggers) | `schema.sql` / clone | pgshift logical repl carries **data only** — `bootstrap` loads schema first (pre-step). For a Supabase source it excludes the ~27 managed schemas (`auth`/`storage`/`extensions`/…) AND filters cluster objects a plain dump still emits (event triggers, `supabase_realtime` pub, `COMMENT ON EXTENSION`, `SET transaction_timeout`) that would abort the restore as non-superuser `postgres` — same as `supabase db dump`; `--all-schemas` forces a full dump |
 | Table data + indexes | `data.sql` / clone / **pgshift replicate** | — |
 | RLS policies | part of schema | `verify` asserts they're enabled on the target post-cutover |
-| DB roles, permissions, users | `roles.sql` (`--role-only`) / clone | **custom LOGIN roles lose passwords** — reset by hand (`ALTER USER … WITH PASSWORD`) |
+| DB roles, permissions, users | `bootstrap` (`pg_dumpall --roles-only --no-role-passwords`) / clone | **custom LOGIN roles lose passwords** — reset by hand (`ALTER USER … WITH PASSWORD`). For a Supabase source, `bootstrap` filters out the reserved roles (`anon`/`authenticated`/`supabase_*`/`postgres`/…) the same way `supabase db dump --role-only` does — only your app roles restore |
 | Auth user data (`auth` schema: accounts, hashed passwords) | `auth.sql` data dump / clone | pgshift: dump+restore `auth` BEFORE replicate (the `auth.users` FK trap) |
 | Sequences | DDL in schema | **values don't replicate** → pgshift `cutover` resyncs every owned sequence |
 | `supabase_migrations` schema (CLI migration history) | only if you dump it **separately** | `supabase db dump --schema supabase_migrations` (schema + data) |
@@ -44,7 +44,7 @@ These live in Postgres, so any data-plane method moves them — but with caveats
 
 | Artifact | What to do | Gotcha |
 |---|---|---|
-| Extensions (enabled state) | re-enable on target before schema load | `doctor` diffs source vs target and lists missing ones |
+| Extensions (enabled state) | `bootstrap` enables them on target before schema load | `doctor` diffs source vs target and prints the `CREATE EXTENSION` statements |
 | `pg_net` / `pg_cron` / `wrappers` / external-effect extensions | re-enable, then **disable on the clone until ready** | clone guide warns these fire external actions immediately on the copy |
 | Database Webhooks | re-enable in dashboard | implemented as `pg_net` triggers — schema carries the trigger, but `pg_net` must be on |
 | `pgsodium` root key / column encryption | copy via API **only if you use column encryption / Vault** | `GET→PUT /pgsodium` (the CLI guide shows this exact pipe). Copying it onto a project that does NOT share the encrypted data makes that data undecryptable — only copy when migrating the encrypted columns too |
@@ -188,7 +188,8 @@ source 404 = SAML off = skip; a target 404 on POST = enable SAML on the target f
 
 ```
 In-DB data ............ replicate + watch + reconcile + cutover  (zero-downtime)
-Schema/roles/auth ..... dump/restore PRE-STEP (doctor diffs extensions + FKs)
+Schema/roles/exts ..... bootstrap    (pg_dumpall/pg_dump/psql; confirm-gated; doctor diffs first)
+Auth/storage row data . dump/restore MANUAL (the auth.users FK trap; doctor prints the command)
 Project config ........ config-sync  (auth, realtime, postgrest, storage, pooler,
                                       dbPostgres, +sslEnforcement +networkRestrictions opt-in)
 Integration secrets ... config-sync  (secrets / projectSecrets — opt-in, never JWT/API keys)

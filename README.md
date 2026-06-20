@@ -23,7 +23,7 @@ fills the data-movement gap and reminds you of the rest:
 
 | Workstream | Handled by | In this tool |
 |---|---|---|
-| Schema / DDL | `supabase db push` / `pg_dump --schema-only` | you run it (see runbook) |
+| Schema / DDL | `bootstrap` (or `supabase db push` / `pg_dump --schema-only`) | `bootstrap --confirm` does extensions + roles + schema |
 | **Table data, low-downtime** | native logical replication | **`replicate` + `watch`** |
 | Sequences | `pg_dump --data-only --table='*_seq'` | `cutover` reminds you (N/A for uuid PKs) |
 | Storage objects | `supabase storage cp` | `storage` wrapper |
@@ -111,25 +111,63 @@ Supabase→Supabase move you must restore those onto the target **before** `repl
 initial copy fails — any FK from a replicated table into `auth.users` rejects every row while
 the target's `auth.users` is empty. `doctor` flags any such cross-schema FK.
 
-The Supabase-blessed dump/restore (see
-[Migrating within Supabase](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore))
-covers exactly the parts this tool skips:
+### `bootstrap` — the automated pre-step
+
+`bootstrap` owns the generic-Postgres part of this (extensions + roles + schema), so you no
+longer hand-run `pg_dump | psql`. It previews by default and only mutates the target with
+`--confirm` (same gate as `provision` / `claim`):
 
 ```bash
-# from the SOURCE (direct or session-pooler connection string)
-supabase db dump --db-url "$SOURCE_DB_URL" -f roles.sql  --role-only
-supabase db dump --db-url "$SOURCE_DB_URL" -f schema.sql                 # DDL: tables, RLS, functions
-supabase db dump --db-url "$SOURCE_DB_URL" -f auth.sql   --data-only --schema auth   # the 3 users etc.
-
-# on the TARGET, in order: roles -> schema -> auth data (triggers off during data load)
-psql --single-transaction --variable ON_ERROR_STOP=1 \
-  --file roles.sql --file schema.sql \
-  --command 'SET session_replication_role = replica' \
-  --file auth.sql --dbname "$TARGET_DB_URL"
+bun start bootstrap                 # preview: prints the exact pg_dump/psql commands + planned extensions
+bun start bootstrap --confirm       # enable extensions on target, then restore roles + schema
 ```
 
-Also enable any **non-default extensions** on the target first — `doctor` diffs source vs
-target extensions and lists the missing ones.
+It runs, in the load-bearing order: enable missing **extensions** (`CREATE EXTENSION IF NOT
+EXISTS`), restore **roles** (lenient — `--no-role-passwords`, tolerates roles that already
+exist), then restore the **schema** atomically (`pg_dump --schema-only` → `psql
+--single-transaction --variable ON_ERROR_STOP=1`, stripping the source's own pub/sub and
+owner/ACLs). Dumps land in `--out-dir` (default `ledger/`) for the audit trail. Works for any
+PG15+ pair, Supabase or not — it shells out to the authoritative `pg_dumpall`/`pg_dump`/`psql`,
+it does not reimplement them.
+
+**When the source is Supabase** (auto-detected from the host), `bootstrap` does what
+`supabase db dump` does internally — but with the system `pg_dump` (no Docker):
+
+- **Schema** — excludes the ~27 Supabase-managed schemas (`auth`, `storage`, `extensions`,
+  `graphql`, `realtime`, `vault`, …) that already exist on every Supabase target, AND runs the
+  same post-dump filter `supabase db dump` does: comments out cluster-level / superuser-owned
+  objects a plain `pg_dump` still emits — **event triggers** (`issue_graphql_placeholder`,
+  `pgrst_ddl_watch`, …), the `supabase_realtime` publication, `COMMENT ON EXTENSION`, FDW
+  grants, and pg17's `SET transaction_timeout` — any of which would abort the atomic restore as
+  the non-superuser `postgres`. Makes `CREATE SCHEMA/TABLE` idempotent. Only your app objects
+  (`public`, …) restore. (The event-trigger trap is real: a plain dump aborts on
+  `Non-superuser owned event trigger must execute a non-superuser owned function` — verified
+  against a live Supabase target.)
+- **Roles** — filters out the Supabase reserved roles (`anon`, `authenticated`, `service_role`,
+  `supabase_*`, `postgres`, …) the same way `supabase db dump --role-only` does: their
+  `CREATE`/`ALTER`/`GRANT` lines are commented out, superuser-only attributes
+  (`NOSUPERUSER`/`NOREPLICATION`) stripped, and only supautils-permitted `ALTER ROLE … SET`
+  GUCs (`statement_timeout`, `pgrst.*`, …) kept. This mirrors the canonical `reservedRoles` /
+  `InternalSchemas` lists in the Supabase CLI source (`apps/cli-go/pkg/migration/dump.go`).
+  Without it, the restore would noisily error on every managed-role collision and fail outright
+  on `ALTER ROLE supabase_admin WITH SUPERUSER` (your connection isn't superuser).
+
+Pass `--all-schemas` to disable both exclusions (full dump — for a non-Supabase clone or a
+truly empty target).
+
+**The one remainder `bootstrap` does NOT do is Supabase `auth` / `storage` ROW data** — that's
+the FK trap above. `doctor` prints the exact command when it detects a cross-schema FK; it is
+the Supabase-blessed dump/restore (see
+[Migrating within Supabase](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore)):
+
+```bash
+# from the SOURCE; load auth DATA onto the target with triggers off (the auth.users FK trap)
+supabase db dump --db-url "$SOURCE_DB_URL" --data-only --schema auth -f auth.sql
+psql "$TARGET_DB_URL" --command 'SET session_replication_role = replica' --file auth.sql
+```
+
+(For roles WITH passwords, or `auth`/`storage` schema customizations, see
+`docs/MIGRATION-SCOPE.md` — those stay manual by design.)
 
 > For the **complete, consolidated scope** — every artifact across Supabase's three official
 > migration guides + the Management-API surface, what carries it, and which pgshift command (or
@@ -234,15 +272,17 @@ bun start doctor --source-only
 # 0b. read-only sanity — versions, wal_level, subscribe grant, replica identity
 bun start preflight
 
-# 1. on the TARGET first (logical replication does NOT carry DDL):
-#    a) enable non-default extensions (see "What this tool does NOT replicate")
-#    b) restore roles + schema + auth/storage DATA via dump/restore (auth.users
-#       must exist before the copy or the FK into auth.users rejects every row)
-#    c) load app schema. Skip the pg_cron schedule migration so the target
-#       doesn't run cleanup independently while both DBs are live:
-for f in $(ls path/to/supabase/migrations/*.sql | grep -v scheduled_jobs); do
-  psql "$TARGET_DB_URL" -f "$f"
-done
+# 1. prepare the TARGET first (logical replication does NOT carry DDL):
+#    a) extensions + roles + schema, automated + confirm-gated:
+bun start bootstrap            # preview the pg_dump/psql plan
+bun start bootstrap --confirm  # apply: extensions, then roles, then schema
+#    b) Supabase only: load auth/storage DATA so the FK into auth.users finds
+#       its rows (doctor prints the exact command):
+#       supabase db dump --db-url "$SOURCE_DB_URL" --data-only --schema auth -f auth.sql
+#       psql "$TARGET_DB_URL" --command 'SET session_replication_role = replica' -f auth.sql
+#    c) if you load app migrations by hand instead of (a), skip the pg_cron
+#       schedule migration so the target doesn't run cleanup while both are live:
+#       for f in $(ls migrations/*.sql | grep -v scheduled_jobs); do psql "$TARGET_DB_URL" -f "$f"; done
 
 # 2. stand up replication (publication + slot + subscription; starts initial copy)
 bun start replicate
@@ -319,11 +359,12 @@ The replication engine is plain Postgres — the integration suite runs it again
 - **Required, as always:** source has `wal_level=logical`; the target role can
   `CREATE SUBSCRIPTION`; the schema (DDL) is loaded on the target first; connection strings are
   **direct** (not a transaction pooler).
-- **Use:** `doctor`, `preflight`, `replicate`, `watch`, `reconcile`, `cutover`, `teardown`,
-  `status`, `run` — all engine-only and Supabase-agnostic.
+- **Use:** `doctor`, `bootstrap`, `preflight`, `replicate`, `watch`, `reconcile`, `cutover`,
+  `teardown`, `status`, `run` — all engine-only and Supabase-agnostic. `bootstrap` does the
+  roles/schema/extension pre-step for you (generic `pg_dumpall`/`pg_dump`/`psql`).
 - **Skip:** `config-sync` (no-ops without `SUPABASE_ACCESS_TOKEN`), `functions`
-  (`functions.enabled: false`), `storage` (`storage.buckets: []`). Use ordinary
-  `pg_dump`/`pg_dumpall` for the roles/schema/extension pre-steps.
+  (`functions.enabled: false`), `storage` (`storage.buckets: []`). The only manual remainder is
+  Supabase `auth`/`storage` row data — N/A for non-Supabase pairs.
 - `doctor`'s Supabase host heuristics (pooler-vs-direct, IPv6, the `auth.users` trap) degrade
   to no-ops on a plain host; the wal_level / replica-identity / version / `CREATE SUBSCRIPTION`
   / schema-loaded / extension-diff checks all still run. Config defaults
@@ -491,6 +532,7 @@ src/
   mgmt.ts             Supabase Management API client
   steps/
     doctor.ts         automated readiness checklist (pre-migration)
+    bootstrap.ts      target pre-step: extensions + roles + schema (pg_dump/psql; confirm-gated)
     run.ts            autonomous pipeline runner (CI/Lambda entry point)
     preflight.ts      read-only gate checks
     checks.ts         shared preflight/doctor SQL (subscribe grant, replication capacity)
