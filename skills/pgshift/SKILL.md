@@ -18,6 +18,7 @@ machine + reconciliation + WAL watchdog**.
 - **Full runbook:** `~/pgshift/docs/RUNBOOK.md` (per-phase, with abort/rollback §12).
 - **Design + every gotcha:** `~/pgshift/README.md`.
 - **Run from the repo:** `cd ~/pgshift && bun start <subcommand>`.
+- **Secrets:** loaded from `.env` (or `--env-file <path>`), AUTHORITATIVE over inherited shell vars — pgshift warns when it overrides a conflicting one, so a stale exported `SOURCE_DB_URL` can't silently point a run at the wrong DB. `--no-env-file` uses the shell env as-is.
 
 Read the README and RUNBOOK before a real migration — this skill is the router,
 not the full procedure.
@@ -33,6 +34,7 @@ not the full procedure.
 | Prove source == target byte-for-byte | `reconcile` (chunked checksum) |
 | Flip over with sequence resync + lag drain | `cutover` (write-stop gate) |
 | Run the whole thing non-interactively in CI/Lambda | `run --through <phase> --json` |
+| Rehearse the whole pipeline hands-on against a throwaway Supabase pair | `sandbox up --org <id>` → drive → `sandbox down` |
 | One-shot health snapshot for a scheduled watcher | `status --json` / `--require-synced` |
 | Copy Auth/Realtime/etc. project config (Supabase) | `config-sync --dry-run` then apply |
 | Manage the managed platform itself (projects, keys, RLS) | `supabase` skill |
@@ -206,9 +208,10 @@ human logs to stderr. The runner must reach the **direct** hosts (IPv6 / IPv4 ad
 bun test                  # unit — pure logic, no DB, always on in CI (zod, SQL-injection guards, bucket-diff, conn-string, config-sync stripping)
 bun run typecheck         # tsc --noEmit
 bun run check             # biome format + lint
-bun run test:integration  # docker PG pair on ONE compose network; real replication + fault injection
+bun run test:integration  # == `bun start rehearse integration`; docker PG pair on ONE compose network; real replication + fault injection
 bun run test:scale        # docker, ROWS=N (default 1M); annoying 4-table schema, per-phase timing
 bun run test:live <org>   # real throwaway Supabase pair, full pipeline + sequence-collision check, auto-deletes projects (costs money)
+bun start sandbox up --org <id>   # hands-on: throwaway Supabase pair you drive yourself (sandbox status / sandbox down)
 ```
 
 **Scale harness** (`test/scale.harness.ts`): annoying schema (STORED gen-column,
