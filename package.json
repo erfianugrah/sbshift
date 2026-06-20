@@ -11,7 +11,7 @@
   "scripts": {
     "start": "bun run src/cli.ts",
     "test": "bun test",
-    "test:integration": "bash scripts/test-integration.sh",
+    "test:integration": "bun start rehearse integration",
     "typecheck": "tsc --noEmit",
     "check": "biome check --write .",
     "lint": "biome check .",

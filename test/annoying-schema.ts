@@ -1,5 +1,8 @@
 /**
- * Shared "annoying schema" fixture used by both harnesses:
+ * The scale/live HARNESS fixture, welded to the harness machinery: `documents`
+ * is a bigint IDENTITY table (writer.ts inserts into it; the inflight-loss
+ * ledger tracks `documents.id`) and `audit` is the no-PK churn table
+ * (`auditChurn`). Used by:
  *   test/scale.harness.ts   — local Docker, 1M-row stress test
  *   test/live.harness.ts    — real Supabase throwaway pair
  *
@@ -8,6 +11,13 @@
  * FULL), inter-table FKs, and every GUC-sensitive type that can produce
  * divergent row::text renders (numeric, float8, timestamptz, interval, inet,
  * bytea, jsonb, text[], citext, enum).
+ *
+ * INTENTIONALLY distinct from src/rehearsal/schema.sql, which is a DIFFERENT
+ * schema (uuid `documents` + a separate `items` IDENTITY table) for the
+ * `rehearse run` / `sandbox` / docker-rehearsal tier and is matched by
+ * seed.ts's seed()/seedToSize(). Merging the two would force one documents
+ * shape onto the other and require rewriting writer.ts + the ledger +
+ * auditChurn — so they are kept separate on purpose, NOT accidental duplication.
  */
 import type { Db } from "../src/db.ts";
 

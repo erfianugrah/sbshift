@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { Command } from "commander";
-import { type Config, loadConfig, loadSecrets } from "./config.ts";
+import { applyEnvFile, type Config, loadConfig, loadSecrets, loadToken } from "./config.ts";
 import { connect, type Db } from "./db.ts";
 import { log } from "./log.ts";
 import { MgmtApi } from "./mgmt.ts";
 import { runChaos, SCENARIOS, type ScenarioName } from "./rehearsal/chaos.ts";
+import { integration } from "./rehearsal/integration.ts";
 import { rehearseRun } from "./rehearsal/orchestrate.ts";
 import { seed, seedToSize } from "./rehearsal/seed.ts";
 import { writer } from "./rehearsal/writer.ts";
@@ -20,6 +21,7 @@ import { provision } from "./steps/provision.ts";
 import { reconcile } from "./steps/reconcile.ts";
 import { replicate } from "./steps/replicate.ts";
 import { PHASES, type Phase, run } from "./steps/run.ts";
+import { sandboxDown, sandboxStatus, sandboxUp } from "./steps/sandbox.ts";
 import { printStatus, status } from "./steps/status.ts";
 import { teardown } from "./steps/teardown.ts";
 import { type FailOn, verify } from "./steps/verify.ts";
@@ -39,6 +41,11 @@ program
   )
   .option("-c, --config <path>", "path to migrate.config.yaml", "migrate.config.yaml")
   .option(
+    "--env-file <path>",
+    "secrets file to load, authoritative over inherited env (default: .env if present)",
+  )
+  .option("--no-env-file", "do not load any secrets file; use the inherited environment as-is")
+  .option(
     "--log-file <path>",
     "mirror all logs to this append-only file (default: logs/pgshift-<command>-<ts>.log)",
   )
@@ -48,6 +55,27 @@ program
 // A migration spans hours; the terminal/SSH session dies but the file persists.
 program.hook("preAction", (thisCommand, actionCommand) => {
   const opts = thisCommand.opts();
+  // Resolve secrets BEFORE any loadSecrets in the action. The file is
+  // authoritative over inherited env (a leaked shell SOURCE_DB_URL must not
+  // silently shadow it), and any override of a *differing* inherited value is
+  // surfaced loudly. `--no-env-file` opts out entirely.
+  if (opts.envFile !== false) {
+    const explicit = typeof opts.envFile === "string";
+    const path = explicit ? (opts.envFile as string) : ".env";
+    if (existsSync(path)) {
+      const { applied, conflicts } = applyEnvFile(path);
+      log.detail(`loaded ${applied.length} var(s) from ${path}`);
+      if (conflicts.length)
+        log.warn(
+          `${path} overrode ${conflicts.length} inherited env var(s): ${conflicts.join(", ")} ` +
+            `(the file wins — pass --no-env-file to use the inherited values instead)`,
+        );
+    } else if (explicit) {
+      log.err(`--env-file ${path} not found`);
+      process.exitCode = 1;
+      throw new Error(`env file not found: ${path}`);
+    }
+  }
   if (opts.logFile === false) return; // --no-log-file
   const cmd = actionCommand.name();
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
@@ -325,6 +353,14 @@ program
 const rehearse = program.command("rehearse").description("rehearsal data harness (test rig)");
 
 rehearse
+  .command("integration")
+  .description("live integration tier: throwaway Docker Postgres pair + bun test (self-contained)")
+  .action(async () => {
+    const code = await integration();
+    if (code !== 0) process.exitCode = code;
+  });
+
+rehearse
   .command("seed")
   .description("seed the source documents table")
   .option("--rows <n>", "row count", "100000")
@@ -410,6 +446,44 @@ rehearse
       });
     }),
   );
+
+// --- sandbox: throwaway Supabase pair for a hands-on rehearsal ---
+const sandbox = program
+  .command("sandbox")
+  .description("throwaway Supabase source+target pair for a hands-on pipeline rehearsal");
+
+sandbox
+  .command("up")
+  .description(
+    "create a throwaway pair, seed the source, write migrate.sandbox.yaml + .env.sandbox",
+  )
+  .requiredOption("--org <id>", "Supabase organization id to create the projects in")
+  .option("--rows <n>", "documents to seed on the source", "3000")
+  .option("--payload <bytes>", "approx payload bytes per document", "2000")
+  .option("--src-region <r>", "source region", "eu-central-1")
+  .option("--tgt-region <r>", "target region", "eu-west-1")
+  .action(async (o) => {
+    const token = loadToken();
+    await sandboxUp(new MgmtApi(token), token, {
+      org: o.org,
+      rows: Number(o.rows),
+      payloadBytes: Number(o.payload),
+      srcRegion: o.srcRegion,
+      tgtRegion: o.tgtRegion,
+    });
+  });
+
+sandbox
+  .command("status")
+  .description("show the current sandbox (refs + drive-the-pipeline commands)")
+  .action(() => sandboxStatus());
+
+sandbox
+  .command("down")
+  .description("delete both throwaway projects and remove the generated sandbox files")
+  .action(async () => {
+    await sandboxDown(new MgmtApi(loadToken()));
+  });
 
 program
   .parseAsync()

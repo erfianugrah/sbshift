@@ -43,7 +43,7 @@ jobs:
       # Live replication + fault injection (lose-row, corrupt-row, drop-replica-identity,
       # generated-col exclusion). Stands up + tears down its own compose network.
       - name: Integration tier
-        run: bash scripts/test-integration.sh
+        run: bun start rehearse integration
 
       # Bootstrap tier: REAL pg_dumpall/pg_dump/psql. Unlike replication it only
       # dumps from the source URL and restores to the target URL (no walreceiver

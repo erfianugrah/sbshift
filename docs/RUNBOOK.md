@@ -511,6 +511,11 @@ project becomes a cold standby.
 | `bun start functions [--dry-run]` | transfer Edge Functions (skip if none) |
 | `bun start storage <localDir> [--dry-run]` | push storage objects (skip if none) |
 | `bun start rehearse run --gib N --payload B [--chaos S --chaos-arg T]` | full scale rehearsal in-tool: seed-to-size → run → fault gate → teardown (THROWAWAY pair) |
+| `bun start sandbox up --org <id>` | create a throwaway Supabase source+target pair, seed the source, write `migrate.sandbox.yaml` + `.env.sandbox` — for a hands-on rehearsal (`sandbox status` / `sandbox down` to inspect / delete) |
 | `bun run test:integration` | live replication/reconcile against a throwaway Postgres pair |
 
-All commands take `-c <path>` for an alternate config (default `migrate.config.yaml`).
+All commands take `-c <path>` for an alternate config (default `migrate.config.yaml`), and
+`--env-file <path>` to load secrets from a specific file (default `.env` if present). The env
+file is **authoritative over inherited shell variables** — pgshift warns when it overrides a
+conflicting one, so a stale `SOURCE_DB_URL` exported in your shell can never silently point a
+run at the wrong database. `--no-env-file` uses the inherited environment as-is.

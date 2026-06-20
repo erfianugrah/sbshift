@@ -1,7 +1,7 @@
 # Throwaway Postgres pair + bun runner for the live integration tier.
 #
 # One command:   bun run test:integration
-# (which is just: docker compose -f docker-compose.test.yml run ... — see scripts/test-integration.sh)
+# (equivalently: bun start rehearse integration)
 #
 # WHY A RUNNER SERVICE INSTEAD OF TWO BARE `docker run`s:
 #   replicate.ts uses ONE connection string (TEST_SOURCE_DB_URL) for both the

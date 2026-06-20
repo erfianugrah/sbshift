@@ -87,6 +87,19 @@ bun run typecheck         # tsc --noEmit
 bun run check             # biome format + lint
 ```
 
+For a **hands-on** rehearsal (drive the pipeline yourself against a real but throwaway Supabase
+pair), use the `sandbox` command instead of the fully-automated `test:live` harness:
+
+```bash
+bun start sandbox up --org <org-id>   # create src+tgt, seed source, write migrate.sandbox.yaml + .env.sandbox
+bun start -c migrate.sandbox.yaml --env-file .env.sandbox doctor   # then bootstrap --confirm / replicate / watch / reconcile / cutover
+bun start sandbox down                # delete both projects + remove the generated files
+```
+
+`--env-file` makes that file authoritative over your shell environment (and warns when it
+overrides a conflicting variable), so a `SOURCE_DB_URL` left exported in your shell can't
+silently shadow the sandbox and point a run at the wrong database. `--no-env-file` opts out.
+
 ### Connection: direct vs pooler (the IPv6 trap)
 
 Both ends need a **direct** connection (`db.<ref>.supabase.co:5432`) — the pooler
@@ -414,7 +427,7 @@ bun run test:live <org>   # 4. live       — real throwaway Supabase projects (
 **Unit** (the `test` CI job): zod config parsing + identifier/SQL-injection guards, config-sync
 secret stripping, bucket-diff classification, conn-string builder.
 
-**Integration** (the `integration` CI job, via `scripts/test-integration.sh`): stands up two
+**Integration** (the `integration` CI job, via `bun start rehearse integration`): stands up two
 ephemeral `postgres:16` containers (source `wal_level=logical`) plus a bun runner **on one
 compose network**, runs `test/integration.test.ts`, and tears it all down. It asserts each fault
 is caught: happy-path reconcile clean, `lose-row` → reconcile fails, `corrupt-row` → reconcile
@@ -550,11 +563,14 @@ src/
     provision.ts      billable infra copy (compute/disk/pitr/ipv4/backup-schedule; confirm-gated)
     verify.ts         post-migration advisor health gate
     claim.ts          org-level project-claim (move project to another org)
+    sandbox.ts        throwaway Supabase pair for a hands-on rehearsal (up/status/down)
     cli-wrappers.ts   supabase functions/storage wrappers
   rehearsal/
+    schema.sql        sandbox / rehearse-run fixture (uuid docs + items IDENTITY/generated/composite/no-PK)
     seed.ts           seed source data (far-future expiry)
     writer.ts         continuous write load + id ledger
-test/                 *.test.ts (unit) + integration.test.ts + scale/live harnesses + annoying-schema.ts
+test/                 *.test.ts (unit) + integration.test.ts (inline itest) + scale/live harnesses
+                      + annoying-schema.ts (their SEPARATE bigint-IDENTITY fixture — see its header)
 docs/RUNBOOK.md       the step-by-step runbook; §9 cutover, §12 rollback
 docs/MIGRATION-SCOPE.md  exhaustive what-migrates/what-doesn't (consolidates the 3 guides)
 ```

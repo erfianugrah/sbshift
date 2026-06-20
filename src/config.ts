@@ -155,6 +155,77 @@ export function loadConfig(path: string): Config {
   return parsed.data;
 }
 
+export interface EnvFileResult {
+  /** keys set from the file */
+  applied: string[];
+  /** keys whose inherited process.env value DIFFERED and was overridden */
+  conflicts: string[];
+}
+
+/** Parse a dotenv-style file into key/value pairs. Pure, testable. */
+export function parseEnvFile(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const body = line.startsWith("export ") ? line.slice(7).trim() : line;
+    const eq = body.indexOf("=");
+    if (eq <= 0) continue;
+    const key = body.slice(0, eq).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let val = body.slice(eq + 1).trim();
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    out[key] = val;
+  }
+  return out;
+}
+
+/**
+ * Load a dotenv-style file and apply it to `process.env`, OVERRIDING any
+ * inherited variable of the same name, and report which inherited values it
+ * actually changed.
+ *
+ * This is deliberately override-wins (unlike Bun's auto-loaded `.env`, which
+ * does NOT override an already-set process.env var). A migration tool must not
+ * silently use a SOURCE_DB_URL leaked from the launching shell when the user
+ * pointed it at an explicit secrets file — that's how you migrate the wrong
+ * database. The CLI surfaces `conflicts` as a warning so the override is never
+ * silent.
+ *
+ * Format: KEY=VALUE per line; blank lines and `#` comments ignored; surrounding
+ * single/double quotes stripped; `export ` prefix tolerated. No interpolation.
+ */
+export function applyEnvFile(path: string): EnvFileResult {
+  const parsed = parseEnvFile(readFileSync(path, "utf8"));
+  const applied: string[] = [];
+  const conflicts: string[] = [];
+  for (const [key, val] of Object.entries(parsed)) {
+    const prior = process.env[key];
+    if (prior !== undefined && prior !== val) conflicts.push(key);
+    process.env[key] = val;
+    applied.push(key);
+  }
+  return { applied, conflicts };
+}
+
+/**
+ * Load ONLY the Supabase access token from the environment. For Management-API
+ * commands that don't (yet) have SOURCE/TARGET connection strings — e.g.
+ * `sandbox up`, which CREATES the projects those URLs will point at.
+ */
+export function loadToken(): string {
+  const tok = process.env.SUPABASE_ACCESS_TOKEN;
+  if (!tok?.startsWith("sbp_")) {
+    throw new Error(
+      "SUPABASE_ACCESS_TOKEN (sbp_…) is required for this command (Management API). " +
+        "Set it in .env or pass --env-file.",
+    );
+  }
+  return tok;
+}
+
 export function loadSecrets(requireToken = false): Secrets {
   const parsed = SecretsSchema.safeParse(process.env);
   if (!parsed.success) {

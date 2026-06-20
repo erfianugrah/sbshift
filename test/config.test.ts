@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { ConfigSchema, SecretsSchema } from "../src/config.ts";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { applyEnvFile, ConfigSchema, parseEnvFile, SecretsSchema } from "../src/config.ts";
 
 const base = {
   source: { ref: "aaaaaaaaaaaaaaaaaaaa" },
@@ -66,5 +69,45 @@ describe("SecretsSchema", () => {
       SUPABASE_ACCESS_TOKEN: "wrong",
     });
     expect(r.success).toBe(false);
+  });
+});
+
+describe("parseEnvFile", () => {
+  test("parses KEY=VALUE, ignores comments/blanks, strips quotes + export", () => {
+    const parsed = parseEnvFile(
+      [
+        "# a comment",
+        "",
+        "SOURCE_DB_URL=postgresql://x:y@h:5432/d",
+        'TARGET_DB_URL="postgresql://a:b@h:5432/d"',
+        "export SUPABASE_ACCESS_TOKEN='sbp_tok'",
+        "  # indented comment",
+        "NOT A LINE",
+        "=novalue",
+      ].join("\n"),
+    );
+    expect(parsed).toEqual({
+      SOURCE_DB_URL: "postgresql://x:y@h:5432/d",
+      TARGET_DB_URL: "postgresql://a:b@h:5432/d",
+      SUPABASE_ACCESS_TOKEN: "sbp_tok",
+    });
+  });
+});
+
+describe("applyEnvFile", () => {
+  test("overrides inherited env and reports only the keys whose value DIFFERED", () => {
+    const dir = mkdtempSync(join(tmpdir(), "pgshift-env-"));
+    const path = join(dir, ".env");
+    writeFileSync(path, "PGSHIFT_TEST_A=fromfile\nPGSHIFT_TEST_B=same\nPGSHIFT_TEST_C=new\n");
+    process.env.PGSHIFT_TEST_A = "fromshell"; // conflict (differs)
+    process.env.PGSHIFT_TEST_B = "same"; // present but identical -> not a conflict
+    delete process.env.PGSHIFT_TEST_C; // absent -> not a conflict
+
+    const { applied, conflicts } = applyEnvFile(path);
+
+    expect(applied.sort()).toEqual(["PGSHIFT_TEST_A", "PGSHIFT_TEST_B", "PGSHIFT_TEST_C"]);
+    expect(conflicts).toEqual(["PGSHIFT_TEST_A"]);
+    expect(process.env.PGSHIFT_TEST_A).toBe("fromfile"); // file won
+    for (const k of ["PGSHIFT_TEST_A", "PGSHIFT_TEST_B", "PGSHIFT_TEST_C"]) delete process.env[k];
   });
 });

@@ -15,3 +15,8 @@ logs/
 # throwaway live-test config (points at ephemeral projects)
 migrate.test.yaml
 ledger.root/
+
+# sandbox command artifacts (throwaway Supabase pair)
+migrate.sandbox.yaml
+.pgshift-sandbox.json
+logs.rootbak/

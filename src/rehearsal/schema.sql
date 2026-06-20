@@ -1,8 +1,19 @@
--- Example document schema for the scale rehearsal. Loaded on BOTH the source
--- and the target (logical replication does not create tables on the subscriber).
--- Mirrors migrate.config.example.yaml columns + the four gotchas the annoying
--- integration schema exercises, so the rehearsal validates the same code paths:
---   L-9: was missing IDENTITY pk, FKs, composite PK, and no-PK table.
+-- Canonical fixture schema for the sandbox / `rehearse run` / docker-rehearsal
+-- tier. Loaded on BOTH source and target (logical replication does not create
+-- tables on the subscriber). Mirrors migrate.config.example.yaml columns + the
+-- four gotchas: STORED generated column (documents.search_vector), IDENTITY pk
+-- (public.items), composite pk (public.tags), and a no-PK table
+-- (public.audit_log, REPLICA IDENTITY FULL).
+--
+-- Consumers: `pgshift rehearse run` (orchestrate.ts + seed.ts seed/seedToSize,
+-- which target this `documents` shape), `pgshift sandbox up`, and the
+-- docker-compose.rehearsal.yml init mount.
+--
+-- INTENTIONALLY distinct from test/annoying-schema.ts. That is a DIFFERENT
+-- schema (bigint-IDENTITY `documents` + a users parent + events child + a no-PK
+-- `audit`) welded to the scale/live harness machinery (writer.ts, the id-ledger,
+-- auditChurn). The two are not merge-able without rewriting that machinery —
+-- keep them separate on purpose, NOT accidental duplication.
 
 CREATE TABLE IF NOT EXISTS public.documents (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -38,7 +38,7 @@ services:
       POSTGRES_PASSWORD: pw
     ports: ["55432:5432"]
     volumes:
-      - ./test/rehearsal-schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      - ./src/rehearsal/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 2s
@@ -63,7 +63,7 @@ services:
       POSTGRES_PASSWORD: pw
     ports: ["55433:5432"]
     volumes:
-      - ./test/rehearsal-schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+      - ./src/rehearsal/schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 2s
