@@ -122,11 +122,7 @@ async function seedSource(
   }
 }
 
-function connsFromEnvFile(): {
-  SOURCE_DB_URL: string;
-  TARGET_DB_URL: string;
-  SOURCE_REPLICATION_URL?: string;
-} {
+function connsFromEnvFile(): Conns {
   const env = parseEnvFile(readFileSync(ENV_FILE, "utf8"));
   if (!env.SOURCE_DB_URL || !env.TARGET_DB_URL)
     throw new Error(`${ENV_FILE} is missing SOURCE_DB_URL/TARGET_DB_URL`);

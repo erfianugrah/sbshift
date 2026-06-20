@@ -123,13 +123,14 @@ export interface ConnInfo {
 export function classifyConn(url: string): ConnInfo {
   const u = new URL(url);
   const host = u.hostname;
+  const port = Number(u.port || "5432");
   const m = /^db\.([a-z0-9]+)\.supabase\.co$/i.exec(host);
+  const isPooler = /(^|\.)pooler\.supabase\.com$/i.test(host);
   return {
     host,
-    port: Number(u.port || "5432"),
-    isPooler: /(^|\.)pooler\.supabase\.com$/i.test(host),
-    isTransactionPooler:
-      /(^|\.)pooler\.supabase\.com$/i.test(host) && Number(u.port || "5432") === 6543,
+    port,
+    isPooler,
+    isTransactionPooler: isPooler && port === 6543,
     isSupabaseDirect: Boolean(m),
     ref: m?.[1],
   };
