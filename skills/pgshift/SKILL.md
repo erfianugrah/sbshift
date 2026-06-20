@@ -31,7 +31,7 @@ not the full procedure.
 | Migrate any PG15+ → PG15+ pair (self-hosted, tier change, project split) | the engine commands, skip Supabase wrappers |
 | Verify readiness before touching anything | `bun start doctor --source-only` |
 | Stand up replication + watch the initial copy | `replicate` → `watch` |
-| Prove source == target byte-for-byte | `reconcile` (chunked checksum) |
+| Prove source == target row-for-row | `reconcile` (chunked checksum) |
 | Flip over with sequence resync + lag drain | `cutover` (write-stop gate) |
 | Run the whole thing non-interactively in CI/Lambda | `run --through <phase> --json` |
 | Rehearse the whole pipeline hands-on against a throwaway Supabase pair | `sandbox up --org <id>` → drive → `sandbox down` |
@@ -82,7 +82,7 @@ Supabase-only commands layered on top: `config-sync` (Management-API config copy
 
 ## High-value traps (the reason this skill exists)
 
-**IPv6 / direct-vs-pooler — the #1 topology trap.**
+**IPv6 / direct-vs-pooler — the most common topology trap.**
 Logical replication needs a **direct** connection (`db.<ref>.supabase.co:5432`);
 the **pooler cannot stream WAL**. Supabase direct hosts are **IPv6-only** (unless
 the IPv4 add-on is enabled). If pgshift runs from a non-IPv6 box: point
@@ -129,7 +129,7 @@ and **excluded from the reconcile hash** (hashing them = false mismatch). They a
 `TimeZone`/`DateStyle`/`IntervalStyle`/`extra_float_digits`/`bytea_output`. Every
 connection in both pools pins those GUCs identically + `statement_timeout=0`.
 
-**Watchdog aborts that matter:** WAL retained > threshold (the #1 outage), slot
+**Watchdog aborts that matter:** WAL retained > threshold (the most common outage), slot
 `wal_status='lost'` (permanently dead — throws immediately), stuck tablesync/apply
 worker (rising error counts or null pid).
 

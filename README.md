@@ -187,10 +187,10 @@ psql "$TARGET_DB_URL" --command 'SET session_replication_role = replica' --file 
 > manual step) owns it — see **[`docs/MIGRATION-SCOPE.md`](docs/MIGRATION-SCOPE.md)**. It is the
 > exhaustive answer to "what are the *some things* not stored in my database?".
 
-## What's baked in (so you don't relearn it at 2am)
+## What's handled for you
 
-The reason to use this over hand-rolled SQL: the failure modes below are already handled. Each
-is grouped by the command that owns it.
+The reason to use this over hand-rolled SQL: the failure modes below are already handled, each
+grouped under the command that owns it.
 
 ### Safety gates the tool enforces
 
@@ -200,7 +200,7 @@ is grouped by the command that owns it.
   `max_replication_slots` / `max_wal_senders` headroom, and subscriber `max_worker_processes`
   / `max_logical_replication_workers` (the managed-Postgres footgun; see Azure below).
 - **`watch`** turns the silent failure modes loud:
-  - **WAL bloat — the #1 outage** → aborts if the slot retains more than
+  - **WAL bloat — the most common outage** → aborts if the slot retains more than
     `watchdog.maxRetainedWalMb` on the source.
   - **Slot invalidation is unrecoverable** → if the source recycles WAL the subscriber never
     read (`max_slot_wal_keep_size` exceeded), `wal_status` flips to `lost` and replication is

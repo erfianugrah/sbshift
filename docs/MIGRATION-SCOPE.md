@@ -13,14 +13,13 @@ This document consolidates all three **plus the Management-API surface** into a
 single scope. `pgshift` adds a fourth mechanism — **near-zero-downtime logical
 replication** — which carries the same in-DB data as a dump but, like every
 other method, carries **none** of the non-database artifacts. Those are the
-"some things", enumerated below exhaustively.
+"some things" each guide hand-waves at; they are enumerated below in full.
 
-The clone guide is the most honest: its automation replicates **compute size,
-disk attributes, SSL enforcement, network restrictions** and data+auth+roles,
-and explicitly lists what it still leaves behind. pgshift's logical-replication
-path carries *less* automatically (only row data), so the manual surface is
-*larger* — which is the whole reason the `config-sync` / `provision` / `verify`
-/ `claim` commands exist.
+The clone guide automates the most: its physical-backup path replicates **compute
+size, disk attributes, SSL enforcement, network restrictions** plus data+auth+roles,
+and lists what it still leaves behind. pgshift's logical-replication path carries
+*less* automatically (row data only), so the manual surface is *larger* — which is
+why the `config-sync` / `provision` / `verify` / `claim` commands exist.
 
 ---
 
@@ -52,8 +51,8 @@ These live in Postgres, so any data-plane method moves them — but with caveats
 
 ## C. NOT in the database — the "some things" (exhaustive)
 
-This is the full answer to "what are these some things?!". Every guide lists a
-*subset*; this is the union, with the carrier and the pgshift command.
+Every guide lists a *subset*; this is the union, with the carrier and the
+pgshift command for each.
 
 | # | Artifact | pgshift | Endpoint / tool | Gotcha |
 |---|---|---|---|---|
@@ -139,9 +138,9 @@ a pgshift command; `🟡` = opt-in flag; `✋` = manual; `🚫` = never / not mi
 | Backups | Schedule (Enterprise) | `PATCH /database/backups/schedule` | 🟡 `provision` (`backupSchedule`) |
 | Migrations | `supabase_migrations` history | separate dump | ✋ dump that schema explicitly |
 
-### Auth (`/auth/*`) — the user's hunch was "probably everything". Almost.
+### Auth (`/auth/*`) — almost everything, with three exceptions
 
-The single `/config/auth` blob (config-sync `auth`) genuinely covers **most** of the Auth nav:
+The single `/config/auth` blob (config-sync `auth`) covers **most** of the Auth nav:
 
 | Auth dashboard section | In `/config/auth`? |
 |---|---|
