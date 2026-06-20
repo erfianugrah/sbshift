@@ -40,6 +40,12 @@ jobs:
         with:
           bun-version: latest
 
+      # Install host deps ONCE up front. `bun start rehearse integration` runs the
+      # CLI on the host (it shells out to docker compose), so node_modules must
+      # already exist — otherwise the first `bun start` auto-installs and a later
+      # `bun install --frozen-lockfile` collides on the .bin symlinks (EEXIST).
+      - run: bun install --frozen-lockfile
+
       # Live replication + fault injection (lose-row, corrupt-row, drop-replica-identity,
       # generated-col exclusion). Stands up + tears down its own compose network.
       - name: Integration tier
@@ -55,7 +61,6 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
-          bun install --frozen-lockfile
           docker run -d --name boot-src -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:16 -c wal_level=logical
           docker run -d --name boot-tgt -e POSTGRES_PASSWORD=pw -p 55433:5432 postgres:16
           export TEST_SOURCE_DB_URL="postgresql://postgres:pw@127.0.0.1:55432/postgres"
