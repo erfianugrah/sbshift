@@ -7,7 +7,7 @@ take and a different vague "some things are not stored in your database" list:
 |---|---|---|
 | [Dashboard restore](https://supabase.com/docs/guides/platform/migrating-within-supabase/dashboard-restore) | logical `*.backup` → `psql` | legacy (older projects on logical backups) |
 | [CLI backup/restore](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore) | `supabase db dump` `*.sql` → `psql` | current for self-driven dump/restore |
-| [Restore to a new project (clone)](https://supabase.com/docs/guides/platform/clone-project) | physical backup / PITR, fully automated | current for paid + physical backups |
+| [Restore to a new project (clone)](https://supabase.com/docs/guides/platform/clone-project) | physical backup / PITR, fully automated | **beta**; paid + physical backups required; clone stays in source region |
 
 This document consolidates all three **plus the Management-API surface** into a
 single scope. `pgshift` adds a fourth mechanism — **near-zero-downtime logical
@@ -63,12 +63,12 @@ pgshift command for each.
 | 5 | **JWT signing secret + API keys (anon/service)** | **never** | — | new project = new keys **by design**; all sessions invalidate, app must re-key + users re-login |
 | 6 | Realtime settings | `config-sync` (`realtime`) | `/config/realtime` | — |
 | 7 | Realtime **publications** (which tables broadcast) | manual | dashboard → Database → Publications | re-enable per table |
-| 8 | PostgREST / Data API settings | `config-sync` (`postgrest`) | `/postgrest` | — |
+| 8 | PostgREST / Data API settings | `config-sync` (`postgrest`) | `/postgrest` | `jwt_secret` is excluded intentionally (new project keeps new signing material) |
 | 9 | Storage config (file size limit, etc.) | `config-sync` (`storage`) | `/config/storage` | — |
 | 10 | Storage buckets (configs) | metadata via dump; objects step below | `/storage/buckets` | bucket rows come with the DB dump |
 | 11 | **Storage objects (actual S3 files)** | `storage` | JS copy script / Colab | the dump carries bucket+file *metadata* but **not the bytes** |
 | 12 | Postgres config (API-exposed GUCs) | `config-sync` (`dbPostgres`, opt-in) | `/config/database/postgres` | only the API-exposed subset (see B for the SQL-level ones) |
-| 13 | Pooler (Supavisor) config | `config-sync` (`dbPooler`) | `/config/database/pgbouncer` | — |
+| 13 | Pooler (Supavisor) config | `config-sync` (`dbPooler`) | `/config/database/pooler` | — |
 | 14 | Compute instance size | `provision` (`compute`) | `PATCH /billing/addons` | **billable**; under-provisioning the target risks cutover load |
 | 15 | Disk attributes (size/iops/throughput/type) | `provision` (`disk`) | `POST /config/disk` | **billable**; size only grows |
 | 16 | SSL enforcement | `config-sync` (`sslEnforcement`, opt-in) | `PUT /ssl-enforcement` | clone does this automatically |
@@ -114,7 +114,7 @@ a pgshift command; `🟡` = opt-in flag; `✋` = manual; `🚫` = never / not mi
 | Data API | API URL | — | 🚫 new per project (auto) |
 | Data API | anon / service_role keys | `GET /api-keys` | 🚫 NEW keys by design — re-key the app |
 | Data API | JWT settings (expiry) | `/config/auth` (`jwt_exp`) | ✅ `config-sync` (`auth`) |
-| Data API | Exposed schemas, search path, max rows | `/postgrest` | ✅ `config-sync` (`postgrest`) |
+| Data API | Exposed schemas, search path, max rows (`jwt_secret` excluded) | `/postgrest` | ✅ `config-sync` (`postgrest`) |
 | Integrations | Vercel / GitHub / etc. | — | ✋ external OAuth installs — re-connect by hand |
 | Vault | Secrets (encrypted) | in-DB + `/pgsodium` | ✋ data via dump; key only if column-encryption |
 | Log Drains | Drain destinations | (no core endpoint) | ✋ re-create by hand |
@@ -125,7 +125,7 @@ a pgshift command; `🟡` = opt-in flag; `✋` = manual; `🚫` = never / not mi
 |---|---|---|---|
 | Settings | Connection string / host / port | — | 🚫 new per project |
 | Settings | Database password | — | ✋ set new on target |
-| Settings | Connection pooling (Supavisor: mode, size) | `/config/database/pgbouncer` | ✅ `config-sync` (`dbPooler`) |
+| Settings | Connection pooling (Supavisor: mode, size) | `/config/database/pooler` | ✅ `config-sync` (`dbPooler`) |
 | Settings | SSL enforcement | `PUT /ssl-enforcement` | 🟡 `config-sync` (`sslEnforcement`) |
 | Settings | Network restrictions (allowed CIDRs) | `POST /network-restrictions/apply` | 🟡 `config-sync` (`networkRestrictions`) |
 | Settings | Network bans (transient IP bans) | `/network-bans` | 🚫 transient — do not migrate |
@@ -195,7 +195,7 @@ Integration secrets ... config-sync  (secrets / projectSecrets — opt-in, never
 Billable infra ........ provision    (compute, disk, pitr, ipv4, backupSchedule — confirm-gated)
 Edge Functions ........ functions
 Storage objects ....... storage
-Health gate ........... verify       (advisors: RLS/PK/etc.)
+Health gate ........... verify       (advisors: RLS/PK/etc.; API is deprecated upstream, pgshift fails closed on advisor fetch errors)
 Invisible SQL GUCs .... doctor       (pg_db_role_setting — detect + warn, manual re-apply)
 Auth sub-resources .... config-sync  (thirdPartyAuth, ssoProviders — opt-in, additive)
 Org move .............. claim

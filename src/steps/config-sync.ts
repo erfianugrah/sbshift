@@ -60,6 +60,22 @@ function isAuthSecret(k: string): boolean {
 }
 
 /**
+ * Dry-run logs should never print credential material even when secret-copying
+ * is explicitly enabled. This is display-only redaction; payload stripping is
+ * still enforced by section-specific transforms.
+ */
+export function isSensitiveKey(k: string): boolean {
+  if (isAuthSecret(k)) return true;
+  // Non-auth secret-ish keys that can appear in other sections.
+  if (/jwt[_-]?secret/i.test(k)) return true;
+  return false;
+}
+
+export function dryRunValue(k: string, v: unknown): string {
+  return isSensitiveKey(k) ? '"****"' : JSON.stringify(v);
+}
+
+/**
  * Strip auth secrets unless `copySecrets` is set. When copying, the integration
  * creds (SMTP/OAuth/SMS/hook secrets) ARE kept — these are the 3rd-party
  * credentials an operator wants to carry across on a migration. The JWT signing
@@ -192,6 +208,15 @@ export function stripStorage(s: Record<string, unknown>): Record<string, unknown
   return Object.fromEntries(Object.entries(s).filter(([k]) => !STORAGE_STRIP.has(k)));
 }
 
+/**
+ * JWT/API signing material must never be copied to a new project by design.
+ * PostgREST exposes `jwt_secret`; drop it unconditionally.
+ */
+export function stripPostgrest(s: Record<string, unknown>): Record<string, unknown> {
+  const { jwt_secret: _drop, ...rest } = s as Record<string, unknown>;
+  return dropNulls(rest);
+}
+
 const SECTIONS: Section[] = [
   {
     key: "auth",
@@ -234,7 +259,7 @@ const SECTIONS: Section[] = [
     getPath: "/postgrest",
     method: "PATCH",
     putPath: "/postgrest",
-    transform: dropNulls,
+    transform: stripPostgrest,
   },
   {
     key: "storage",
@@ -302,7 +327,7 @@ export async function configSync(
       // actually "eyeball the diff" as the docs promise.
       log.detail(`would ${section.method} ${Object.keys(payload).length} keys:`);
       for (const [k, v] of Object.entries(payload)) {
-        log.detail(`  ${k} = ${JSON.stringify(v)}`);
+        log.detail(`  ${k} = ${dryRunValue(k, v)}`);
       }
       result.ok++;
       continue;

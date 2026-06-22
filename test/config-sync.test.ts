@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   dropNulls,
+  dryRunValue,
   planSsoProviders,
   planThirdPartyAuth,
   type SamlProvider,
   stripAuth,
+  stripPostgrest,
   stripStorage,
   type ThirdPartyAuth,
   toNetworkRestrictions,
@@ -244,7 +246,7 @@ describe("planSsoProviders", () => {
   });
 });
 
-describe("dropNulls / stripStorage", () => {
+describe("dropNulls / stripStorage / stripPostgrest", () => {
   test("dropNulls removes null values only", () => {
     expect(dropNulls({ a: 1, b: null, c: false, d: 0 })).toEqual({ a: 1, c: false, d: 0 });
   });
@@ -258,5 +260,28 @@ describe("dropNulls / stripStorage", () => {
       features: ["a"],
     });
     expect(out).toEqual({ fileSizeLimit: 50 });
+  });
+
+  test("stripPostgrest drops jwt_secret unconditionally", () => {
+    const out = stripPostgrest({
+      db_schema: "public",
+      max_rows: 1000,
+      jwt_secret: "super-secret",
+      db_extra_search_path: null,
+    });
+    expect(out).toEqual({ db_schema: "public", max_rows: 1000 });
+    expect(out).not.toHaveProperty("jwt_secret");
+  });
+});
+
+describe("dryRunValue redaction", () => {
+  test("redacts secret-like keys", () => {
+    expect(dryRunValue("jwt_secret", "abc")).toBe('"****"');
+    expect(dryRunValue("smtp_pass", "abc")).toBe('"****"');
+  });
+
+  test("keeps non-secret values visible", () => {
+    expect(dryRunValue("max_rows", 1000)).toBe("1000");
+    expect(dryRunValue("pool_mode", "transaction")).toBe('"transaction"');
   });
 });
