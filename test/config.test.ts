@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { applyEnvFile, ConfigSchema, parseEnvFile, SecretsSchema } from "../src/config.ts";
+import {
+  applyEnvFile,
+  ConfigSchema,
+  parseEnvFile,
+  SecretsSchema,
+  supabaseSourceRef,
+} from "../src/config.ts";
 
 const base = {
   source: { ref: "aaaaaaaaaaaaaaaaaaaa" },
@@ -31,6 +37,40 @@ describe("ConfigSchema", () => {
     expect(ConfigSchema.safeParse(bad).success).toBe(false);
   });
 
+  test("a legacy source with only a ref still parses as the postgres engine (back-compat)", () => {
+    const cfg = ConfigSchema.parse(base); // base.source = { ref } — no engine declared
+    expect(cfg.source.engine).toBe("postgres");
+    if (cfg.source.engine === "postgres") expect(cfg.source.ref).toBe("aaaaaaaaaaaaaaaaaaaa");
+  });
+
+  test("a postgres source still requires a >=15-char ref", () => {
+    const bad = { ...base, source: { engine: "postgres", ref: "tooshort" } };
+    expect(ConfigSchema.safeParse(bad).success).toBe(false);
+  });
+
+  test("a mysql source parses with serverId + databases and NO ref", () => {
+    const cfg = ConfigSchema.parse({
+      ...base,
+      source: { engine: "mysql", serverId: 184054, databases: ["inventory"] },
+      replication: { tables: ["inventory.customers"] },
+      reconcile: { tables: [{ name: "inventory.customers" }] },
+    });
+    expect(cfg.source.engine).toBe("mysql");
+    if (cfg.source.engine === "mysql") {
+      expect(cfg.source.serverId).toBe(184054);
+      expect(cfg.source.databases).toEqual(["inventory"]);
+    }
+  });
+
+  test("a mysql source rejects a missing serverId or empty databases", () => {
+    const noServerId = { ...base, source: { engine: "mysql", databases: ["inventory"] } };
+    const noDbs = { ...base, source: { engine: "mysql", serverId: 1, databases: [] } };
+    expect(ConfigSchema.safeParse(noServerId).success).toBe(false);
+    expect(ConfigSchema.safeParse(noDbs).success).toBe(false);
+  });
+});
+
+describe("ConfigSchema (replication/reconcile guards)", () => {
   test("rejects a publication name that is not a bare identifier", () => {
     const bad = {
       ...base,
@@ -55,6 +95,23 @@ describe("ConfigSchema", () => {
       reconcile: { tables: [{ name: "public.documents", hashColumns: ['id"; drop'] }] },
     };
     expect(ConfigSchema.safeParse(bad).success).toBe(false);
+  });
+});
+
+describe("supabaseSourceRef", () => {
+  test("returns the ref for a postgres source", () => {
+    const cfg = ConfigSchema.parse(base);
+    expect(supabaseSourceRef(cfg)).toBe("aaaaaaaaaaaaaaaaaaaa");
+  });
+
+  test("throws for a heterogeneous source (no Supabase project ref)", () => {
+    const cfg = ConfigSchema.parse({
+      ...base,
+      source: { engine: "mysql", serverId: 1, databases: ["inventory"] },
+      replication: { tables: ["inventory.customers"] },
+      reconcile: { tables: [{ name: "inventory.customers" }] },
+    });
+    expect(() => supabaseSourceRef(cfg)).toThrow(/Supabase SOURCE project/);
   });
 });
 

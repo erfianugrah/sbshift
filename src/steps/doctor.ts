@@ -115,7 +115,11 @@ export async function doctor(
 
   // ── 1. config + secrets (no network) ───────────────────────────────────
   log.step("doctor: config + connection shape");
-  log.detail(`source ref ${cfg.source.ref}  →  target ref ${cfg.target.ref}`);
+  log.detail(
+    cfg.source.engine === "postgres"
+      ? `source ref ${cfg.source.ref}  →  target ref ${cfg.target.ref}`
+      : `source engine ${cfg.source.engine}  →  target ref ${cfg.target.ref}`,
+  );
   secrets.SUPABASE_ACCESS_TOKEN
     ? ok("SUPABASE_ACCESS_TOKEN present (config-sync available)")
     : warn("SUPABASE_ACCESS_TOKEN unset — config-sync will be unavailable");

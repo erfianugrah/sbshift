@@ -1,7 +1,14 @@
 #!/usr/bin/env bun
 import { existsSync, readFileSync } from "node:fs";
 import { Command } from "commander";
-import { applyEnvFile, type Config, loadConfig, loadSecrets, loadToken } from "./config.ts";
+import {
+  applyEnvFile,
+  type Config,
+  loadConfig,
+  loadSecrets,
+  loadToken,
+  supabaseSourceRef,
+} from "./config.ts";
 import { connect, type Db } from "./db.ts";
 import { engineFor } from "./engine/index.ts";
 import { allDriftableItems, DEFAULT_MAX_AGE_DAYS, kbDrift, renderDrift } from "./kb/drift.ts";
@@ -252,7 +259,7 @@ program
     const secrets = loadSecrets(true);
     const api = new MgmtApi(secrets.SUPABASE_ACCESS_TOKEN as string);
     api
-      .assertAccess([cfg.source.ref, cfg.target.ref])
+      .assertAccess([supabaseSourceRef(cfg), cfg.target.ref])
       .then(() => configSync(api, cfg, { dryRun: Boolean(o.dryRun) }))
       .then((r) => {
         if (r.err > 0) process.exitCode = 1;
@@ -305,7 +312,7 @@ program
     const secrets = loadSecrets(true);
     const api = new MgmtApi(secrets.SUPABASE_ACCESS_TOKEN as string);
     api
-      .assertAccess([cfg.source.ref, cfg.target.ref])
+      .assertAccess([supabaseSourceRef(cfg), cfg.target.ref])
       .then(() => provision(api, cfg, { confirm: Boolean(o.confirm) }))
       .then((r) => {
         if (!r.ok) process.exitCode = 1;

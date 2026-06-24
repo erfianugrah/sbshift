@@ -1,4 +1,4 @@
-import type { Config } from "../config.ts";
+import { type Config, supabaseSourceRef } from "../config.ts";
 import { log } from "../log.ts";
 
 /**
@@ -21,7 +21,7 @@ export async function transferFunctions(cfg: Config, opts: { dryRun: boolean }):
     log.detail("functions.enabled=false — skipping");
     return;
   }
-  await run(["supabase", "functions", "download", "--project-ref", cfg.source.ref], opts);
+  await run(["supabase", "functions", "download", "--project-ref", supabaseSourceRef(cfg)], opts);
   await run(["supabase", "functions", "deploy", "--project-ref", cfg.target.ref], opts);
   log.ok("functions deployed to target (re-set their secrets manually)");
 }

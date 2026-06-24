@@ -1,4 +1,4 @@
-import type { Config } from "../config.ts";
+import { type Config, supabaseSourceRef } from "../config.ts";
 import { log } from "../log.ts";
 import type { MgmtApi } from "../mgmt.ts";
 
@@ -113,9 +113,8 @@ export async function provision(
   cfg: Config,
   opts: { confirm: boolean },
 ): Promise<ProvisionResult> {
-  log.step(
-    `provision ${cfg.source.ref} → ${cfg.target.ref}${opts.confirm ? "" : " (preview only)"}`,
-  );
+  const sourceRef = supabaseSourceRef(cfg);
+  log.step(`provision ${sourceRef} → ${cfg.target.ref}${opts.confirm ? "" : " (preview only)"}`);
   const p = cfg.provision;
   const result: ProvisionResult = { ok: true, planned: 0, applied: 0 };
 
@@ -127,7 +126,7 @@ export async function provision(
   if (enabled.length > 0) {
     log.info("--- Addons (compute / pitr / ipv4) ---");
     const [srcA, tgtA] = await Promise.all([
-      api.get<AddonsResponse>(cfg.source.ref, "/billing/addons"),
+      api.get<AddonsResponse>(sourceRef, "/billing/addons"),
       api.get<AddonsResponse>(cfg.target.ref, "/billing/addons"),
     ]);
     if (srcA.status !== 200 || !srcA.body || tgtA.status !== 200 || !tgtA.body) {
@@ -165,7 +164,7 @@ export async function provision(
   if (p.disk) {
     log.info("--- Disk attributes ---");
     const [srcD, tgtD] = await Promise.all([
-      api.get<{ attributes?: DiskAttributes }>(cfg.source.ref, "/config/disk"),
+      api.get<{ attributes?: DiskAttributes }>(sourceRef, "/config/disk"),
       api.get<{ attributes?: DiskAttributes }>(cfg.target.ref, "/config/disk"),
     ]);
     if (
@@ -206,10 +205,7 @@ export async function provision(
   // ── backup schedule (Enterprise plan only) ─────────────────────────────
   if (p.backupSchedule) {
     log.info("--- Backup schedule ---");
-    const srcS = await api.get<{ schedule_for?: string }>(
-      cfg.source.ref,
-      "/database/backups/schedule",
-    );
+    const srcS = await api.get<{ schedule_for?: string }>(sourceRef, "/database/backups/schedule");
     if (srcS.status === 402) {
       log.warn("backup schedule requires the Enterprise plan — skipping");
     } else if (srcS.status !== 200 || !srcS.body?.schedule_for) {

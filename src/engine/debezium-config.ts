@@ -16,6 +16,8 @@
  * container as a file); callers MUST keep it out of logs.
  */
 
+import type { Config, Secrets } from "../config.ts";
+
 /** A MySQL source the Debezium MySQL connector captures from (spike-proven). SQL Server uses a
  *  different connector + CDC change-tables and is not rendered yet (HETEROGENEOUS.md §6). */
 export interface DebeziumMySqlSource {
@@ -70,6 +72,72 @@ export function assertNoConfigExpression(properties: string): void {
 /** Escape a string for use inside a Java regex (the RegexRouter `regex` value). */
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Decompose a DB connection URL into its parts (percent-decoding credentials). */
+function parseDbUrl(
+  url: string,
+  defaultPort: number,
+): { host: string; port: number; user: string; password: string; database: string } {
+  const u = new URL(url);
+  const database = decodeURIComponent(u.pathname.replace(/^\//, ""));
+  if (!u.hostname) throw new Error(`connection URL has no host: ${u.protocol}//…`);
+  return {
+    host: u.hostname,
+    port: u.port ? Number(u.port) : defaultPort,
+    user: decodeURIComponent(u.username),
+    password: decodeURIComponent(u.password),
+    database,
+  };
+}
+
+/**
+ * Build a {@link DebeziumPlan} from real pgshift `Config` + `Secrets` — the bridge between the
+ * control-plane config and the spike-proven renderer. Source connection comes from
+ * `SOURCE_DB_URL` (a `mysql://` URL); only the structural bits (`serverId`, `databases`) live in
+ * `config.source`. The JDBC sink target comes from `TARGET_DB_URL` (a `postgresql://` URL),
+ * rewritten to the `jdbc:postgresql://host:port/db` form the Debezium JDBC sink expects.
+ *
+ * Narrows `config.source` to the `mysql` engine: `postgres` uses native logical replication (no
+ * Debezium), and `sqlserver` uses a different connector + CDC change-tables not rendered yet
+ * (HETEROGENEOUS.md §6). The capture table-list reuses `replication.tables` (schema.table ≡
+ * db.table for MySQL). Defaults `schemaEvolution` to `none` (production: pre-create the target
+ * from the guided schema draft — finding #6); pass `basic` only for the spike/smoke harness.
+ */
+export function debeziumPlanFromConfig(
+  cfg: Config,
+  secrets: Secrets,
+  opts: { dataDir?: string; schemaEvolution?: "none" | "basic" } = {},
+): DebeziumPlan {
+  if (cfg.source.engine !== "mysql") {
+    throw new Error(
+      `debeziumPlanFromConfig supports only mysql sources; source.engine is '${cfg.source.engine}'. ` +
+        "postgres uses native logical replication; sqlserver is not rendered yet (HETEROGENEOUS.md §6).",
+    );
+  }
+  const src = parseDbUrl(secrets.SOURCE_DB_URL, 3306);
+  const tgt = parseDbUrl(secrets.TARGET_DB_URL, 5432);
+  return {
+    // logical server name; topics are `<prefix>.<db>.<table>` and the RegexRouter strips it.
+    topicPrefix: cfg.replication.publication,
+    source: {
+      flavour: "mysql",
+      hostname: src.host,
+      port: src.port,
+      user: src.user,
+      password: src.password,
+      serverId: cfg.source.serverId,
+      databases: cfg.source.databases,
+      tables: cfg.replication.tables,
+    },
+    target: {
+      jdbcUrl: `jdbc:postgresql://${tgt.host}:${tgt.port}/${tgt.database}`,
+      user: tgt.user,
+      password: tgt.password,
+    },
+    schemaEvolution: opts.schemaEvolution ?? "none",
+    dataDir: opts.dataDir ?? "/debezium/data",
+  };
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { Config } from "../config.ts";
+import { type Config, supabaseSourceRef } from "../config.ts";
 import { log } from "../log.ts";
 import type { MgmtApi } from "../mgmt.ts";
 
@@ -298,7 +298,9 @@ export async function configSync(
   cfg: Config,
   opts: { dryRun: boolean },
 ): Promise<ConfigSyncResult> {
-  log.step(`config-sync ${cfg.source.ref} -> ${cfg.target.ref}${opts.dryRun ? " (dry-run)" : ""}`);
+  log.step(
+    `config-sync ${supabaseSourceRef(cfg)} -> ${cfg.target.ref}${opts.dryRun ? " (dry-run)" : ""}`,
+  );
   const result: ConfigSyncResult = { ok: 0, err: 0, skipped: 0 };
 
   for (const section of SECTIONS) {
@@ -308,7 +310,7 @@ export async function configSync(
     }
     log.info(`--- ${section.label} ---`);
 
-    const src = await api.get<Record<string, unknown>>(cfg.source.ref, section.getPath);
+    const src = await api.get<Record<string, unknown>>(supabaseSourceRef(cfg), section.getPath);
     if (src.status !== 200 || !src.body) {
       log.warn(`GET source ${section.label} failed (HTTP ${src.status}) — skipping`);
       result.skipped++;
@@ -393,7 +395,10 @@ async function syncProjectSecrets(
   opts: { dryRun: boolean },
 ): Promise<"ok" | "err" | "skipped"> {
   log.info("--- Project Secrets (Edge Function env) ---");
-  const src = await api.get<Array<{ name?: unknown; value?: unknown }>>(cfg.source.ref, "/secrets");
+  const src = await api.get<Array<{ name?: unknown; value?: unknown }>>(
+    supabaseSourceRef(cfg),
+    "/secrets",
+  );
   if (src.status !== 200 || !Array.isArray(src.body)) {
     log.warn(`GET source project secrets failed (HTTP ${src.status}) \u2014 skipping`);
     return "skipped";
@@ -425,7 +430,7 @@ async function syncThirdPartyAuth(
 ): Promise<"ok" | "err" | "skipped"> {
   log.info("--- Third-Party Auth integrations ---");
   const [src, tgt] = await Promise.all([
-    api.get<ThirdPartyAuth[]>(cfg.source.ref, "/config/auth/third-party-auth"),
+    api.get<ThirdPartyAuth[]>(supabaseSourceRef(cfg), "/config/auth/third-party-auth"),
     api.get<ThirdPartyAuth[]>(cfg.target.ref, "/config/auth/third-party-auth"),
   ]);
   if (src.status !== 200 || !Array.isArray(src.body)) {
@@ -463,7 +468,7 @@ async function syncSsoProviders(
 ): Promise<"ok" | "err" | "skipped"> {
   log.info("--- SSO / SAML providers ---");
   const [src, tgt] = await Promise.all([
-    api.get<{ items?: SamlProvider[] }>(cfg.source.ref, "/config/auth/sso/providers"),
+    api.get<{ items?: SamlProvider[] }>(supabaseSourceRef(cfg), "/config/auth/sso/providers"),
     api.get<{ items?: SamlProvider[] }>(cfg.target.ref, "/config/auth/sso/providers"),
   ]);
   // 404 = SAML 2.0 not enabled for this project.

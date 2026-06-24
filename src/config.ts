@@ -26,16 +26,52 @@ const ReconcileTable = z.object({
 /**
  * The database engine a source speaks. Selects the data-plane `ReplicationEngine`
  * (HETEROGENEOUS.md §3): `postgres` → native logical replication (`native-pg`), the
- * heterogeneous engines → Debezium CDC (`debezium`). Defaults to `postgres` so every
- * existing config — none of which declares an engine — keeps resolving to today's path.
+ * heterogeneous engines → Debezium CDC (`debezium`).
  */
-export const SourceEngineSchema = z.enum(["postgres", "mysql", "sqlserver"]).default("postgres");
+export const SourceEngineSchema = z.enum(["postgres", "mysql", "sqlserver"]);
 export type SourceEngine = z.infer<typeof SourceEngineSchema>;
 
-export const ConfigSchema = z.object({
+/**
+ * Source declaration, discriminated on `engine` (HETEROGENEOUS.md §3).
+ *
+ *  - `postgres` (default): a Supabase/PG project addressed by its Management-API `ref`. The
+ *    source connection itself comes from SOURCE_DB_URL (secrets), as always.
+ *  - `mysql` / `sqlserver` (heterogeneous, Debezium): NO Supabase ref / Management API. The
+ *    source connection comes from SOURCE_DB_URL (a `mysql://` / `sqlserver://` URL); only the
+ *    structural bits Debezium needs live here. `serverId` is the MySQL binlog client id (KB
+ *    item mysql.binlog_enabled); `databases` is the capture include-list.
+ *
+ * Backward-compat: a legacy `source: { ref }` with no `engine` is rewritten to
+ * `engine: "postgres"` BEFORE the union, so every existing PG config keeps parsing unchanged.
+ */
+const PostgresSourceSchema = z.object({
+  engine: z.literal("postgres"),
   /** Supabase project ref of the SOURCE project (for the Management API). */
-  source: z.object({ ref: z.string().min(15), engine: SourceEngineSchema }),
-  /** Supabase project ref of the TARGET project (for the Management API). */
+  ref: z.string().min(15),
+});
+const MySqlSourceSchema = z.object({
+  engine: z.literal("mysql"),
+  /** `SELECT @@server_id` — unique binlog client id (KB item mysql.binlog_enabled). */
+  serverId: z.number().int().positive(),
+  /** MySQL databases to capture, e.g. ["inventory"]. */
+  databases: z.array(Ident).min(1),
+});
+const SqlServerSourceSchema = z.object({
+  engine: z.literal("sqlserver"),
+  /** Databases with CDC enabled to capture from. */
+  databases: z.array(Ident).min(1),
+});
+export const SourceSchema = z.preprocess(
+  (v) =>
+    v && typeof v === "object" && !Array.isArray(v) && !("engine" in v)
+      ? { ...(v as Record<string, unknown>), engine: "postgres" }
+      : v,
+  z.discriminatedUnion("engine", [PostgresSourceSchema, MySqlSourceSchema, SqlServerSourceSchema]),
+);
+
+export const ConfigSchema = z.object({
+  source: SourceSchema,
+  /** Supabase project ref of the TARGET project (always Supabase/PG — for the Management API). */
   target: z.object({ ref: z.string().min(15) }),
 
   replication: z.object({
@@ -133,6 +169,24 @@ export const ConfigSchema = z.object({
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
+
+/**
+ * The Supabase project ref of the SOURCE, or throw. The Management-API commands — `provision`,
+ * `config-sync`, edge-function transfer, and the `assertAccess` token check — are
+ * Supabase-source-only and have no meaning for a heterogeneous (mysql/sqlserver) source, which
+ * has no project ref. Calling them with a non-postgres source is a config error, surfaced
+ * loudly here rather than as a confusing downstream Management-API 404 (HETEROGENEOUS.md §3).
+ */
+export function supabaseSourceRef(cfg: Config): string {
+  if (cfg.source.engine !== "postgres") {
+    throw new Error(
+      `This command targets a Supabase SOURCE project, but source.engine is '${cfg.source.engine}'. ` +
+        "Heterogeneous (mysql/sqlserver) sources have no Supabase project ref or Management API — " +
+        "provision / config-sync / functions do not apply (HETEROGENEOUS.md §3).",
+    );
+  }
+  return cfg.source.ref;
+}
 
 /** Secrets never live in the YAML — they come from the environment. */
 export const SecretsSchema = z.object({
