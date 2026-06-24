@@ -109,7 +109,9 @@ export function renderAggregateQuery(
   const charLen = charLenFn(engine);
   const rel = `${q(schema)}.${q(table)}`;
 
-  const selects: string[] = ["count(*) AS rowcount"];
+  // `rowcount` is a RESERVED keyword in T-SQL (SET ROWCOUNT), so the alias must be quoted for
+  // SQL Server; quoting it in every dialect keeps the parsed result key (`rowcount`) identical.
+  const selects: string[] = [`count(*) AS ${q("rowcount")}`];
   columns.forEach((col, i) => {
     const c = q(col.name);
     for (const m of aggregatesFor(col.category)) {

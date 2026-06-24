@@ -46,7 +46,7 @@ describe("renderAggregateQuery", () => {
 
   test("MySQL: backtick quoting, CHAR_LENGTH, deterministic aliases", () => {
     const q = renderAggregateQuery("mysql", "inventory", "customers", cols);
-    expect(q).toContain("count(*) AS rowcount");
+    expect(q).toContain("count(*) AS `rowcount`");
     expect(q).toContain("FROM `inventory`.`customers`");
     expect(q).toContain("sum(`id`) AS c0_sum");
     expect(q).toContain("min(`id`) AS c0_min");
@@ -60,7 +60,9 @@ describe("renderAggregateQuery", () => {
 
   test("SQL Server: bracket quoting, LEN, deterministic aliases", () => {
     const q = renderAggregateQuery("sqlserver", "dbo", "customers", cols);
-    expect(q).toContain("count(*) AS rowcount");
+    // `rowcount` is a T-SQL reserved keyword — the alias MUST be bracket-quoted or it is a syntax error
+    expect(q).toContain("count(*) AS [rowcount]");
+    expect(q).not.toContain("AS rowcount");
     expect(q).toContain("FROM [dbo].[customers]");
     expect(q).toContain("sum([id]) AS c0_sum");
     expect(q).toContain("count([id]) AS c0_non_null");
@@ -71,6 +73,7 @@ describe("renderAggregateQuery", () => {
 
   test("Postgres: double-quote quoting, char_length", () => {
     const q = renderAggregateQuery("postgres", "public", "customers", cols);
+    expect(q).toContain('count(*) AS "rowcount"');
     expect(q).toContain('FROM "public"."customers"');
     expect(q).toContain('sum(char_length("name")) AS c1_char_len_sum');
     expect(q).toContain('sum("id") AS c0_sum');
