@@ -31,6 +31,13 @@
 /** The Debezium Server core + JDBC-sink version the engine runs. Pre-GA, image+jar aligned. */
 export const DEBEZIUM_SERVER_VERSION = "3.6.0.Beta2";
 
+/**
+ * The custom engine image tag, built from `images/debezium-server/` (the stock server image +
+ * the JDBC-sink jars + the Postgres driver layered in — finding #3). Tagged with the pinned
+ * version so the build and the runtime can never silently diverge.
+ */
+export const DEBEZIUM_IMAGE = `pgshift/debezium-server:${DEBEZIUM_SERVER_VERSION}`;
+
 /** Maven coordinates of the no-Kafka JDBC sink (must be layered into a custom image — finding #3). */
 export const DEBEZIUM_JDBC_SINK_ARTIFACT = "io.debezium:debezium-server-jdbc";
 

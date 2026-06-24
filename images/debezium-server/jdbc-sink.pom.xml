@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The extra-jar manifest for pgshift's DebeziumEngine image: the no-Kafka JDBC sink + its
+     transitive deps + the Postgres driver. The stock quay.io/debezium/server image bundles 14
+     messaging sinks (kafka, kinesis, pubsub, redis, …) but NOT debezium-server-jdbc, and ships
+     no target-DB driver. This pom IS that manifest (spike finding #3).
+
+     VERSION PIN: debezium-server-jdbc MUST match the server-core version in the Dockerfile FROM
+     (3.6.0.Beta2). The newer 3.6.0.CR1 jar exists on Maven Central but there is no CR1 server
+     image, so CR1-on-Beta2 would be an unsupported skew (HETEROGENEOUS.md §5). -->
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>dev.pgshift</groupId>
+  <artifactId>dbz-jdbc-sink-deps</artifactId>
+  <version>1.0</version>
+  <packaging>pom</packaging>
+  <dependencies>
+    <dependency>
+      <groupId>io.debezium</groupId>
+      <artifactId>debezium-server-jdbc</artifactId>
+      <version>3.6.0.Beta2</version>
+    </dependency>
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.4</version>
+    </dependency>
+  </dependencies>
+</project>
