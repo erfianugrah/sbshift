@@ -1,0 +1,51 @@
+# Heterogeneous SQL Server integration harness (HETEROGENEOUS.md §6) — the SQL Server analogue of
+# docker-compose.yml. Brings up the SOURCE (SQL Server 2022, CDC-capable) and TARGET (Postgres) on
+# a named network; the Debezium container is launched by the engine's replicate() via `docker run`
+# and joined to this network (PGSHIFT_DBZ_NETWORK=pgshift-dbz-it-mssql).
+#
+# Unlike the pre-seeded MySQL image, the harness seeds SQL Server itself after `up --wait`
+# (CREATE DATABASE + sp_cdc_enable_db + table + sp_cdc_enable_table + rows) — see harness-sqlserver.ts.
+# SQL Server Agent MUST be on (MSSQL_AGENT_ENABLED=true) or the CDC capture job never runs.
+#
+# Run: see README.md. Requires Docker; NOT part of `bun test`.
+name: pgshift-dbz-it-mssql
+
+services:
+  mssql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Pgshift!Passw0rd"
+      MSSQL_AGENT_ENABLED: "true" # required: CDC capture/cleanup run as SQL Agent jobs
+      MSSQL_PID: "Developer" # Developer edition supports CDC (EngineEdition 3)
+    ports:
+      - "51433:1433" # host-side, for the harness's own sqlcmd seeding + assertions
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -C -Q 'SELECT 1' || exit 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [it]
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: target
+    ports:
+      - "55433:5432" # host-side, for the harness's row assertions (distinct from the MySQL harness)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d target"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [it]
+
+networks:
+  it:
+    name: pgshift-dbz-it-mssql

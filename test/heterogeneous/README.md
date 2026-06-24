@@ -1,9 +1,14 @@
 # Heterogeneous integration harness
 
-End-to-end verification for the `DebeziumEngine` (MySQL → Postgres, no Kafka —
-[`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5). The production analogue of the
+End-to-end verification for the `DebeziumEngine` (MySQL **and SQL Server** → Postgres, no Kafka —
+[`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5–6). The production analogue of the
 proven spike (`spike/debezium-mysql/`), but it drives **pgshift's real engine** rather than a
-hand-written compose service.
+hand-written compose service. There are two harnesses, one per source engine:
+
+| Source | Harness | Compose |
+|---|---|---|
+| MySQL (binlog) | `harness.ts` | `docker-compose.yml` |
+| SQL Server (CDC) | `harness-sqlserver.ts` | `docker-compose.sqlserver.yml` |
 
 > **Requires Docker. Not part of `bun test`** (no `.test.ts` suffix), and not runnable on the dev
 > box per the no-running-daemons safety rule. Run it in a Docker-capable environment (CI / your
@@ -14,8 +19,11 @@ hand-written compose service.
 ## Run
 
 ```bash
-bun run test/heterogeneous/harness.ts
+bun run test/heterogeneous/harness.ts             # MySQL source
+bun run test/heterogeneous/harness-sqlserver.ts   # SQL Server source
 ```
+
+### MySQL harness
 
 The harness self-contains the whole sequence (exit 0 = PASS):
 
@@ -38,6 +46,28 @@ The harness self-contains the whole sequence (exit 0 = PASS):
 reconcile/watch/cutover run in the host process and query MySQL directly, so the harness points
 `SOURCE_DB_URL` at the published `127.0.0.1:53306` for them (replicate's rendered config keeps the
 in-network `mysql:3306`).
+
+### SQL Server harness
+
+Same shape, with SQL-Server-specific seeding (the `mcr.microsoft.com/mssql/server:2022-latest`
+image is not pre-seeded). On the `pgshift-dbz-it-mssql` network, host ports `51433` / `55433`,
+health on `18081`:
+
+1. **build** the engine image (same `images/debezium-server/` — the Debezium Server image carries
+   the SQL Server connector);
+2. **up** SQL Server (Developer edition, `MSSQL_AGENT_ENABLED=true` so the CDC capture job runs) +
+   an EMPTY Postgres target;
+3. **seed** — `CREATE DATABASE inventory`, `sys.sp_cdc_enable_db`, `dbo.customers` (IDENTITY PK),
+   `sys.sp_cdc_enable_table`, 4 rows — via `sqlcmd` inside the container;
+4. **translate** — `draftTargetSchemaSqlServer()` reads the T-SQL catalog, drafts the DDL
+   (IDENTITY → flagged decision), applies it, signs off;
+5. **replicate** → **snapshot** (4 rows) → **CDC** (insert streams via the cdc change-tables) →
+   **reconcile** (bracket-quoted, `LEN`, sqlserver dialect) → **watch** → **cutover** (the
+   CDC-`max_lsn` write-stop gate instead of the binlog position) → **teardown**.
+
+> SQL Server CDC needs **SQL Server Agent running** (the capture/cleanup jobs) — hence
+> `MSSQL_AGENT_ENABLED=true`. The capture job polls roughly every 5s, so the snapshot/CDC waits
+> allow extra tries vs the MySQL harness.
 
 ## Topology
 
@@ -67,5 +97,6 @@ harness addresses them by published host ports for its own inserts + assertions.
 ## Status
 
 The full lifecycle (replicate / reconcile / watch / cutover / teardown) is exercised and passes
-against real Debezium 3.6.0.Beta2 + MySQL 8.2 + Postgres 16. See
-[`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5.
+against real Debezium 3.6.0.Beta2 + MySQL 8.2 + Postgres 16. The SQL Server harness
+(`harness-sqlserver.ts`) mirrors it against SQL Server 2022 (Developer, CDC) + Postgres 16. See
+[`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5–6.
