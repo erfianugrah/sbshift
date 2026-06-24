@@ -1,9 +1,23 @@
 import { log } from "../log.ts";
+import { checks } from "./checks.ts";
+import { sourcePrep } from "./engine-prep.ts";
+import { providerHints } from "./provider-hints.ts";
 import type { Provenance } from "./schema.ts";
 
-/** Anything `kb drift` can age-check: a stable id + a provenance stamp. Both `ProviderHintItem`
- *  and `CheckItem` satisfy this, so the drift check spans the whole KB, not just one catalog. */
+/** Anything `kb drift` can age-check: a stable id + a provenance stamp. `ProviderHintItem`,
+ *  `CheckItem`, and `SourcePrepItem` all satisfy this, so the drift check spans the whole KB,
+ *  not just one catalog. */
 export type DriftableItem = { id: string; provenance: Provenance };
+
+/**
+ * The entire drift-checkable KB — every catalog concatenated in ONE place so the `kb drift`
+ * CLI and its coverage test can't silently disagree on what gets age-checked (the f27194c
+ * concern, now generalised to the heterogeneous source-prep catalog). Add a catalog here and
+ * both the command and the guard pick it up.
+ */
+export function allDriftableItems(): DriftableItem[] {
+  return [...providerHints, ...checks, ...sourcePrep];
+}
 
 /** Default staleness threshold — mirrors the run-time soft-warn cadence in
  *  docs/GUIDED-MIGRATION.md §6 ("this step's knowledge is 90 days old"). */

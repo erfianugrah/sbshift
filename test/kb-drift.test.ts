@@ -1,6 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { checks } from "../src/kb/checks.ts";
-import { DEFAULT_MAX_AGE_DAYS, type DriftableItem, kbDrift } from "../src/kb/drift.ts";
+import {
+  allDriftableItems,
+  DEFAULT_MAX_AGE_DAYS,
+  type DriftableItem,
+  kbDrift,
+} from "../src/kb/drift.ts";
+import { sourcePrep } from "../src/kb/engine-prep.ts";
 import { providerHints } from "../src/kb/provider-hints.ts";
 
 function item(id: string, lastSynced: string): DriftableItem {
@@ -56,12 +62,19 @@ describe("kbDrift", () => {
     expect(future.staleCount).toBe(providerHints.length);
   });
 
-  test("drift spans BOTH catalogs — provider hints and live checks", () => {
-    const combined = [...providerHints, ...checks];
-    const r = kbDrift(combined, { now });
-    expect(r.rows.length).toBe(combined.length);
-    // every check id is represented, not just provider-hint ids
-    const ids = new Set(r.rows.map((x) => x.id));
+  test("allDriftableItems spans EVERY catalog — provider hints, live checks, source-prep", () => {
+    const all = allDriftableItems();
+    expect(all.length).toBe(providerHints.length + checks.length + sourcePrep.length);
+    const ids = new Set(all.map((x) => x.id));
+    for (const h of providerHints) expect(ids.has(h.id)).toBe(true);
     for (const c of checks) expect(ids.has(c.id)).toBe(true);
+    for (const s of sourcePrep) expect(ids.has(s.id)).toBe(true);
+  });
+
+  test("drift report covers the whole KB and ids stay unique across catalogs", () => {
+    const all = allDriftableItems();
+    const r = kbDrift(all, { now });
+    expect(r.rows.length).toBe(all.length);
+    expect(new Set(r.rows.map((x) => x.id)).size).toBe(all.length);
   });
 });
