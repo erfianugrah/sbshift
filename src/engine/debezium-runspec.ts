@@ -24,6 +24,32 @@ const CONFIG_PATH_IN_CONTAINER = "/debezium/config/application.properties";
 /** Debezium Server's Quarkus HTTP port (health at `/q/health`, metrics scraped by `watch`). */
 const QUARKUS_PORT = 8080;
 
+/** The container name for a migration, derived from the topic prefix (a bare ident). Stable so
+ *  `replicate` and `teardown` address the same container without sharing state. */
+export function debeziumContainerName(topicPrefix: string): string {
+  return `pgshift-dbz-${topicPrefix}`;
+}
+
+/** The default persistent volume backing the data dir (offsets + schema-history) for a migration. */
+export function debeziumDataVolume(topicPrefix: string): string {
+  return `${debeziumContainerName(topicPrefix)}-data`;
+}
+
+/** `docker stop` argv for a migration's container. */
+export function debeziumStopArgv(name: string): string[] {
+  return ["docker", "stop", name];
+}
+
+/** `docker rm` argv (force, so a stopped-or-running container is removed idempotently). */
+export function debeziumRmArgv(name: string): string[] {
+  return ["docker", "rm", "-f", name];
+}
+
+/** `docker volume rm` argv for the persistent offset/schema-history volume. */
+export function debeziumVolumeRmArgv(volume: string): string[] {
+  return ["docker", "volume", "rm", volume];
+}
+
 export interface BindMount {
   host: string;
   container: string;
@@ -77,7 +103,7 @@ export function debeziumRunSpec(opts: RunSpecOpts): DebeziumRunSpec {
     throw new Error(`debeziumRunSpec: metricsPort must be a positive integer, got ${metricsPort}`);
   }
   const image = opts.image ?? DEBEZIUM_IMAGE;
-  const name = opts.name ?? `pgshift-dbz-${plan.topicPrefix}`;
+  const name = opts.name ?? debeziumContainerName(plan.topicPrefix);
 
   const mounts: BindMount[] = [
     // the rendered config, read-only — contains secrets, never written by the container

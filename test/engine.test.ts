@@ -115,11 +115,12 @@ describe("DebeziumEngine", () => {
     expect(engine.kind).toBe("debezium");
   });
 
-  test("every lifecycle method fails loud (runtime gated on the vehicle decision)", async () => {
-    await expect(engine.replicate(src, tgt, cfg, secrets)).rejects.toThrow(/not implemented yet/);
+  test("watch / reconcile / cutover are still gated and fail loud", async () => {
+    // these touch notImplemented before reading cfg, so the opaque sentinel is fine
     await expect(engine.watch(src, tgt, cfg)).rejects.toThrow(/not implemented yet/);
     await expect(engine.reconcile(src, tgt, cfg)).rejects.toThrow(/not implemented yet/);
     await expect(engine.cutover(src, tgt, cfg, {})).rejects.toThrow(/not implemented yet/);
-    await expect(engine.teardown(src, tgt, cfg)).rejects.toThrow(/not implemented yet/);
   });
+  // replicate + teardown ARE implemented (injected-IO orchestration) — see
+  // test/debezium-runtime-io.test.ts, which drives them with a mock DebeziumIO.
 });

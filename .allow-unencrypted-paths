@@ -4,3 +4,7 @@
 # Throwaway Debezium spike: compose + config use demo credentials from the public
 # quay.io/debezium/example-mysql image (postgres/postgres, debezium/dbz). No real secrets.
 spike/*
+
+# Heterogeneous integration harness: same public demo credentials as the spike
+# (quay.io/debezium/example-mysql — postgres/postgres, debezium/dbz). No real secrets.
+test/heterogeneous/*

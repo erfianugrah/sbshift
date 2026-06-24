@@ -1,0 +1,51 @@
+# Heterogeneous integration harness (HETEROGENEOUS.md §5) — the production analogue of the
+# throwaway spike (spike/debezium-mysql/), wired so it drives the real DebeziumEngine.
+#
+# This compose brings up only the SOURCE (MySQL) and TARGET (Postgres) on a named network. The
+# Debezium container is NOT defined here — the engine's `replicate()` spawns it via `docker run`
+# and joins it to this network (PGSHIFT_DBZ_NETWORK=pgshift-dbz-it). That is the whole point of
+# the harness: exercise pgshift's own container lifecycle, not a hand-written compose service.
+#
+# Run: see README.md. Requires Docker; NOT part of `bun test` (no .test.ts suffix).
+name: pgshift-dbz-it
+
+services:
+  mysql:
+    # Debezium tutorial source: inventory DB pre-seeded (4 customers), binlog ROW+FULL on,
+    # CDC user debezium/dbz granted — a source that already passes the §7 source-prep KB.
+    image: quay.io/debezium/example-mysql:3.0
+    environment:
+      MYSQL_ROOT_PASSWORD: debezium
+      MYSQL_USER: mysqluser
+      MYSQL_PASSWORD: mysqlpw
+    ports:
+      - "53306:3306" # host-side, for the harness's own `docker compose exec` inserts
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-pdebezium"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [it]
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: target
+    ports:
+      - "55432:5432" # host-side, for the harness's row assertions
+    volumes:
+      # production runs schema.evolution=none and PRE-CREATES the target from the guided draft;
+      # the harness mirrors that — this init script is the stand-in for the translated schema.
+      - ./init-target.sql:/docker-entrypoint-initdb.d/init-target.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d target"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [it]
+
+networks:
+  it:
+    # fixed name so the engine can join the Debezium container to it via PGSHIFT_DBZ_NETWORK.
+    name: pgshift-dbz-it
