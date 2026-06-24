@@ -21,7 +21,7 @@
  */
 
 /** A source dialect this reconcile can render against. Postgres is the target side. */
-export type AggEngine = "mysql" | "postgres";
+export type AggEngine = "mysql" | "postgres" | "sqlserver";
 
 /**
  * Portable aggregate metrics — chosen so the SAME value comes back from MySQL and Postgres for
@@ -76,7 +76,21 @@ export function categorizePgType(dataType: string): ColumnTypeCategory {
 
 /** Quote an identifier for the given engine. Inputs are validated bare idents upstream (config). */
 function quoteIdent(engine: AggEngine, ident: string): string {
-  return engine === "mysql" ? `\`${ident}\`` : `"${ident}"`;
+  if (engine === "mysql") return `\`${ident}\``;
+  if (engine === "sqlserver") return `[${ident}]`;
+  return `"${ident}"`;
+}
+
+/**
+ * The char-length function name per dialect. SQL Server's `LEN` strips trailing spaces (unlike
+ * MySQL `CHAR_LENGTH` / Postgres `char_length`), so the text char_len_sum can show a benign diff
+ * for space-padded `char(n)` columns — acceptable for this already-coarse downgraded check, and
+ * the row-count + numeric signals are unaffected.
+ */
+function charLenFn(engine: AggEngine): string {
+  if (engine === "mysql") return "CHAR_LENGTH";
+  if (engine === "sqlserver") return "LEN";
+  return "char_length";
 }
 
 /** Deterministic result alias for (column index, metric) — the parser maps it back. */
@@ -92,7 +106,7 @@ export function renderAggregateQuery(
   columns: AggColumn[],
 ): string {
   const q = (id: string) => quoteIdent(engine, id);
-  const charLen = engine === "mysql" ? "CHAR_LENGTH" : "char_length";
+  const charLen = charLenFn(engine);
   const rel = `${q(schema)}.${q(table)}`;
 
   const selects: string[] = ["count(*) AS rowcount"];

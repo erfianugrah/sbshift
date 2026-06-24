@@ -84,10 +84,50 @@ describe("renderDebeziumServerConfig", () => {
     expect(c).toContain("debezium.source.table.include.list=inventory.customers,sales.orders");
   });
 
-  test("rejects a non-mysql source (SQL Server not spiked yet)", () => {
-    // @ts-expect-error — exercising the runtime guard with an unsupported flavour
-    const bad = plan({ source: { ...plan().source, flavour: "sqlserver" } });
-    expect(() => renderDebeziumServerConfig(bad)).toThrow(/only mysql/);
+  test("renders the SQL Server CDC connector topology", () => {
+    const c = renderDebeziumServerConfig(
+      plan({
+        source: {
+          flavour: "sqlserver",
+          hostname: "mssql",
+          port: 1433,
+          user: "sa",
+          password: "pw",
+          databases: ["inventory"],
+          tables: ["dbo.customers"],
+          encrypt: false,
+        },
+      }),
+    );
+    expect(c).toContain(
+      "debezium.source.connector.class=io.debezium.connector.sqlserver.SqlServerConnector",
+    );
+    expect(c).toContain("debezium.source.database.names=inventory");
+    expect(c).not.toContain("database.include.list"); // SQL Server uses database.names
+    expect(c).toContain("debezium.source.database.encrypt=false");
+    expect(c).toContain("debezium.source.table.include.list=dbo.customers");
+    expect(c).toContain("debezium.sink.type=jdbc");
+    // 4-segment topic (<prefix>.<db>.<schema>.<table>) needs one extra stripped segment
+    expect(c).toContain("debezium.transforms.route.regex=dbz\\.[^.]+\\.[^.]+\\.(.*)");
+    expect(c).not.toContain("${");
+  });
+
+  test("SQL Server encrypt=true flows through (Azure SQL requires TLS)", () => {
+    const c = renderDebeziumServerConfig(
+      plan({
+        source: {
+          flavour: "sqlserver",
+          hostname: "azure",
+          port: 1433,
+          user: "sa",
+          password: "pw",
+          databases: ["db"],
+          tables: ["dbo.t"],
+          encrypt: true,
+        },
+      }),
+    );
+    expect(c).toContain("debezium.source.database.encrypt=true");
   });
 
   test("rejects an empty table or database set", () => {
@@ -164,7 +204,7 @@ describe("debeziumPlanFromConfig", () => {
     expect(p.schemaEvolution).toBe("basic");
   });
 
-  test("rejects a non-mysql source", () => {
+  test("rejects a postgres source (native logical replication, no Debezium)", () => {
     const pgCfg = ConfigSchema.parse({
       source: { ref: "aaaaaaaaaaaaaaaaaaaa" },
       target: { ref: "bbbbbbbbbbbbbbbbbbbb" },
@@ -172,7 +212,49 @@ describe("debeziumPlanFromConfig", () => {
       reconcile: { tables: [{ name: "public.documents" }] },
       watchdog: {},
     });
-    expect(() => debeziumPlanFromConfig(pgCfg, secrets())).toThrow(/only mysql/);
+    expect(() => debeziumPlanFromConfig(pgCfg, secrets())).toThrow(/only heterogeneous/);
+  });
+
+  test("maps a SQL Server config + secrets into a renderable plan (encrypt from URL)", () => {
+    const ssCfg = ConfigSchema.parse({
+      source: { engine: "sqlserver", databases: ["inventory"] },
+      target: { ref: "bbbbbbbbbbbbbbbbbbbb" },
+      replication: { tables: ["dbo.customers"], publication: "dbz" },
+      reconcile: { tables: [{ name: "dbo.customers" }] },
+      watchdog: {},
+    });
+    const p = debeziumPlanFromConfig(
+      ssCfg,
+      secrets({ SOURCE_DB_URL: "sqlserver://sa:pw@mssqlhost:1433/inventory?encrypt=true" }),
+    );
+    expect(p.source).toMatchObject({
+      flavour: "sqlserver",
+      hostname: "mssqlhost",
+      port: 1433,
+      user: "sa",
+      databases: ["inventory"],
+      tables: ["dbo.customers"],
+      encrypt: true,
+    });
+    const c = renderDebeziumServerConfig(p);
+    expect(c).toContain("debezium.source.database.names=inventory");
+    expect(c).toContain("debezium.source.database.encrypt=true");
+  });
+
+  test("SQL Server source defaults port 1433 and encrypt=false", () => {
+    const ssCfg = ConfigSchema.parse({
+      source: { engine: "sqlserver", databases: ["inventory"] },
+      target: { ref: "bbbbbbbbbbbbbbbbbbbb" },
+      replication: { tables: ["dbo.customers"], publication: "dbz" },
+      reconcile: { tables: [{ name: "dbo.customers" }] },
+      watchdog: {},
+    });
+    const p = debeziumPlanFromConfig(
+      ssCfg,
+      secrets({ SOURCE_DB_URL: "sqlserver://sa:pw@mssqlhost/inventory" }),
+    );
+    expect(p.source.port).toBe(1433);
+    expect((p.source as { encrypt: boolean }).encrypt).toBe(false);
   });
 });
 

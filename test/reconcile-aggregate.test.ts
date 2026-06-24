@@ -58,6 +58,17 @@ describe("renderAggregateQuery", () => {
     expect(q).not.toContain("c2_min");
   });
 
+  test("SQL Server: bracket quoting, LEN, deterministic aliases", () => {
+    const q = renderAggregateQuery("sqlserver", "dbo", "customers", cols);
+    expect(q).toContain("count(*) AS rowcount");
+    expect(q).toContain("FROM [dbo].[customers]");
+    expect(q).toContain("sum([id]) AS c0_sum");
+    expect(q).toContain("count([id]) AS c0_non_null");
+    expect(q).toContain("sum(LEN([name])) AS c1_char_len_sum");
+    expect(q).toContain("count([created_at]) AS c2_non_null");
+    expect(q).not.toContain("c2_min");
+  });
+
   test("Postgres: double-quote quoting, char_length", () => {
     const q = renderAggregateQuery("postgres", "public", "customers", cols);
     expect(q).toContain('FROM "public"."customers"');

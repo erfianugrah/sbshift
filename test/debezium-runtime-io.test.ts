@@ -156,7 +156,7 @@ describe("DebeziumEngine.replicate (mocked IO)", () => {
     expect(calls.health.length).toBe(0);
   });
 
-  test("rejects a non-mysql source before any IO (plan builder guard)", async () => {
+  test("rejects a postgres source before any IO (plan builder guard)", async () => {
     const pgCfg = ConfigSchema.parse({
       source: { ref: "aaaaaaaaaaaaaaaaaaaa" },
       target: { ref: "bbbbbbbbbbbbbbbbbbbb" },
@@ -166,7 +166,7 @@ describe("DebeziumEngine.replicate (mocked IO)", () => {
     });
     const { io, calls } = mockIO();
     await expect(new DebeziumEngine(io).replicate(NODB, NODB, pgCfg, secrets())).rejects.toThrow(
-      /only mysql/,
+      /only heterogeneous/,
     );
     expect(calls.exec.length).toBe(0);
   });

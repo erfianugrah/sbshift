@@ -18,8 +18,7 @@
 
 import type { Config, Secrets } from "../config.ts";
 
-/** A MySQL source the Debezium MySQL connector captures from (spike-proven). SQL Server uses a
- *  different connector + CDC change-tables and is not rendered yet (HETEROGENEOUS.md §6). */
+/** A MySQL source the Debezium MySQL connector captures from (spike-proven). */
 export interface DebeziumMySqlSource {
   flavour: "mysql";
   hostname: string;
@@ -34,6 +33,29 @@ export interface DebeziumMySqlSource {
   tables: string[];
 }
 
+/**
+ * A SQL Server source the Debezium SQL Server connector captures from. Unlike MySQL's binlog, this
+ * reads CDC change-tables (KB item sqlserver.cdc_enable), so the source must have CDC enabled at DB
+ * + table scope first. Topics are `<prefix>.<database>.<schema>.<table>` (4 segments — one more
+ * than MySQL's `<prefix>.<db>.<table>`), so the RegexRouter strips an extra segment.
+ */
+export interface DebeziumSqlServerSource {
+  flavour: "sqlserver";
+  hostname: string;
+  port: number;
+  user: string;
+  password: string;
+  /** CDC-enabled databases to capture, e.g. ["inventory"] (Debezium `database.names`). */
+  databases: string[];
+  /** schema-qualified tables, e.g. ["dbo.customers"] (the `dbo` is the SQL Server schema). */
+  tables: string[];
+  /** TLS to the source. Azure SQL requires true; on-prem/VM often false. Default false. */
+  encrypt: boolean;
+}
+
+/** The heterogeneous source a Debezium plan captures from (discriminated on `flavour`). */
+export type DebeziumSource = DebeziumMySqlSource | DebeziumSqlServerSource;
+
 /** The Postgres/Supabase target the JDBC sink writes into. */
 export interface DebeziumTarget {
   /** jdbc:postgresql://host:port/db */
@@ -45,7 +67,7 @@ export interface DebeziumTarget {
 export interface DebeziumPlan {
   /** Debezium topic prefix (logical server name). Topics are `<prefix>.<db>.<table>`. */
   topicPrefix: string;
-  source: DebeziumMySqlSource;
+  source: DebeziumSource;
   target: DebeziumTarget;
   /**
    * `none` (production): pgshift pre-creates the target schema from the guided draft.
@@ -98,10 +120,10 @@ function parseDbUrl(
  * `config.source`. The JDBC sink target comes from `TARGET_DB_URL` (a `postgresql://` URL),
  * rewritten to the `jdbc:postgresql://host:port/db` form the Debezium JDBC sink expects.
  *
- * Narrows `config.source` to the `mysql` engine: `postgres` uses native logical replication (no
- * Debezium), and `sqlserver` uses a different connector + CDC change-tables not rendered yet
- * (HETEROGENEOUS.md §6). The capture table-list reuses `replication.tables` (schema.table ≡
- * db.table for MySQL). Defaults `schemaEvolution` to `none` (production: pre-create the target
+ * Narrows `config.source` to the heterogeneous engines (`mysql` / `sqlserver`): `postgres` uses
+ * native logical replication (no Debezium) and is rejected here. The capture table-list reuses
+ * `replication.tables` (for MySQL schema.table ≡ db.table; for SQL Server it is schema.table within
+ * the `databases` catalog). Defaults `schemaEvolution` to `none` (production: pre-create the target
  * from the guided schema draft — finding #6); pass `basic` only for the spike/smoke harness.
  */
 export function debeziumPlanFromConfig(
@@ -109,35 +131,58 @@ export function debeziumPlanFromConfig(
   secrets: Secrets,
   opts: { dataDir?: string; schemaEvolution?: "none" | "basic" } = {},
 ): DebeziumPlan {
-  if (cfg.source.engine !== "mysql") {
-    throw new Error(
-      `debeziumPlanFromConfig supports only mysql sources; source.engine is '${cfg.source.engine}'. ` +
-        "postgres uses native logical replication; sqlserver is not rendered yet (HETEROGENEOUS.md §6).",
-    );
-  }
-  const src = parseDbUrl(secrets.SOURCE_DB_URL, 3306);
   const tgt = parseDbUrl(secrets.TARGET_DB_URL, 5432);
-  return {
-    // logical server name; topics are `<prefix>.<db>.<table>` and the RegexRouter strips it.
+  const target: DebeziumTarget = {
+    jdbcUrl: `jdbc:postgresql://${tgt.host}:${tgt.port}/${tgt.database}`,
+    user: tgt.user,
+    password: tgt.password,
+  };
+  const base = {
+    // logical server name; the RegexRouter strips the topic prefix + db/schema segments.
     topicPrefix: cfg.replication.publication,
-    source: {
-      flavour: "mysql",
-      hostname: src.host,
-      port: src.port,
-      user: src.user,
-      password: src.password,
-      serverId: cfg.source.serverId,
-      databases: cfg.source.databases,
-      tables: cfg.replication.tables,
-    },
-    target: {
-      jdbcUrl: `jdbc:postgresql://${tgt.host}:${tgt.port}/${tgt.database}`,
-      user: tgt.user,
-      password: tgt.password,
-    },
-    schemaEvolution: opts.schemaEvolution ?? "none",
+    target,
+    schemaEvolution: opts.schemaEvolution ?? ("none" as const),
     dataDir: opts.dataDir ?? "/debezium/data",
   };
+
+  if (cfg.source.engine === "mysql") {
+    const src = parseDbUrl(secrets.SOURCE_DB_URL, 3306);
+    return {
+      ...base,
+      source: {
+        flavour: "mysql",
+        hostname: src.host,
+        port: src.port,
+        user: src.user,
+        password: src.password,
+        serverId: cfg.source.serverId,
+        databases: cfg.source.databases,
+        tables: cfg.replication.tables,
+      },
+    };
+  }
+  if (cfg.source.engine === "sqlserver") {
+    const src = parseDbUrl(secrets.SOURCE_DB_URL, 1433);
+    // `?encrypt=true` in SOURCE_DB_URL flips TLS on (required for Azure SQL).
+    const encrypt = /[?&]encrypt=true\b/i.test(secrets.SOURCE_DB_URL);
+    return {
+      ...base,
+      source: {
+        flavour: "sqlserver",
+        hostname: src.host,
+        port: src.port,
+        user: src.user,
+        password: src.password,
+        databases: cfg.source.databases,
+        tables: cfg.replication.tables,
+        encrypt,
+      },
+    };
+  }
+  throw new Error(
+    `debeziumPlanFromConfig supports only heterogeneous sources; source.engine is '${cfg.source.engine}'. ` +
+      "postgres uses native logical replication (no Debezium).",
+  );
 }
 
 /**
@@ -147,37 +192,15 @@ export function debeziumPlanFromConfig(
  */
 export function renderDebeziumServerConfig(plan: DebeziumPlan): string {
   const { topicPrefix, source, target, schemaEvolution, dataDir } = plan;
-  if (source.flavour !== "mysql") {
-    throw new Error(
-      `Debezium config rendering supports only mysql sources today; got '${source.flavour}'. ` +
-        "SQL Server uses a different connector + CDC change-tables and is not spiked yet " +
-        "(HETEROGENEOUS.md §6).",
-    );
-  }
   if (source.tables.length === 0) throw new Error("Debezium plan has no source tables");
   if (source.databases.length === 0) throw new Error("Debezium plan has no source databases");
 
-  // RegexRouter: match every `<prefix>.<anything>.<table>` and keep only the final segment.
-  // $1 has no braces, so it survives SmallRye (finding #5). One regex covers all databases.
-  const routeRegex = `${escapeRegex(topicPrefix)}\\.[^.]+\\.(.*)`;
+  const { sourceLines, routeRegex } = renderSourceSection(source, topicPrefix, dataDir);
 
   const lines = [
-    "# Rendered by pgshift — Debezium Server MySQL → Postgres (no Kafka). DO NOT log: contains secrets.",
+    `# Rendered by pgshift — Debezium Server ${source.flavour} → Postgres (no Kafka). DO NOT log: contains secrets.`,
     "",
-    "# ── source: MySQL connector ──",
-    "debezium.source.connector.class=io.debezium.connector.mysql.MySqlConnector",
-    `debezium.source.topic.prefix=${topicPrefix}`,
-    `debezium.source.database.hostname=${source.hostname}`,
-    `debezium.source.database.port=${source.port}`,
-    `debezium.source.database.user=${source.user}`,
-    `debezium.source.database.password=${source.password}`,
-    `debezium.source.database.server.id=${source.serverId}`,
-    `debezium.source.database.include.list=${source.databases.join(",")}`,
-    `debezium.source.table.include.list=${source.tables.join(",")}`,
-    `debezium.source.offset.storage.file.filename=${dataDir}/offsets.dat`,
-    "debezium.source.offset.flush.interval.ms=0",
-    "debezium.source.schema.history.internal=io.debezium.storage.file.history.FileSchemaHistory",
-    `debezium.source.schema.history.internal.file.filename=${dataDir}/schema_history.dat`,
+    ...sourceLines,
     "",
     "# ── sink: JDBC straight into Postgres ──",
     "debezium.sink.type=jdbc",
@@ -201,4 +224,66 @@ export function renderDebeziumServerConfig(plan: DebeziumPlan): string {
   const out = lines.join("\n");
   assertNoConfigExpression(out);
   return out;
+}
+
+/**
+ * Render the connector-specific source block + the RegexRouter regex, forked by source flavour.
+ * MySQL: binlog connector, `database.include.list`, topics `<prefix>.<db>.<table>` (3 segments).
+ * SQL Server: CDC connector, `database.names`, topics `<prefix>.<db>.<schema>.<table>` (4 segments
+ * — the regex strips one more leading segment so rows still land under the bare table name).
+ */
+function renderSourceSection(
+  source: DebeziumSource,
+  topicPrefix: string,
+  dataDir: string,
+): { sourceLines: string[]; routeRegex: string } {
+  const prefix = escapeRegex(topicPrefix);
+  const history = [
+    "debezium.source.schema.history.internal=io.debezium.storage.file.history.FileSchemaHistory",
+    `debezium.source.schema.history.internal.file.filename=${dataDir}/schema_history.dat`,
+  ];
+  const offsets = [
+    `debezium.source.offset.storage.file.filename=${dataDir}/offsets.dat`,
+    "debezium.source.offset.flush.interval.ms=0",
+  ];
+
+  if (source.flavour === "mysql") {
+    return {
+      // `<prefix>.<db>.<table>` → keep only the final segment. $1 has no braces (finding #5).
+      routeRegex: `${prefix}\\.[^.]+\\.(.*)`,
+      sourceLines: [
+        "# ── source: MySQL connector ──",
+        "debezium.source.connector.class=io.debezium.connector.mysql.MySqlConnector",
+        `debezium.source.topic.prefix=${topicPrefix}`,
+        `debezium.source.database.hostname=${source.hostname}`,
+        `debezium.source.database.port=${source.port}`,
+        `debezium.source.database.user=${source.user}`,
+        `debezium.source.database.password=${source.password}`,
+        `debezium.source.database.server.id=${source.serverId}`,
+        `debezium.source.database.include.list=${source.databases.join(",")}`,
+        `debezium.source.table.include.list=${source.tables.join(",")}`,
+        ...offsets,
+        ...history,
+      ],
+    };
+  }
+
+  // sqlserver: CDC change-tables. database.names (not include.list); 4-segment topics.
+  return {
+    routeRegex: `${prefix}\\.[^.]+\\.[^.]+\\.(.*)`,
+    sourceLines: [
+      "# ── source: SQL Server connector (CDC change-tables) ──",
+      "debezium.source.connector.class=io.debezium.connector.sqlserver.SqlServerConnector",
+      `debezium.source.topic.prefix=${topicPrefix}`,
+      `debezium.source.database.hostname=${source.hostname}`,
+      `debezium.source.database.port=${source.port}`,
+      `debezium.source.database.user=${source.user}`,
+      `debezium.source.database.password=${source.password}`,
+      `debezium.source.database.names=${source.databases.join(",")}`,
+      `debezium.source.database.encrypt=${source.encrypt}`,
+      `debezium.source.table.include.list=${source.tables.join(",")}`,
+      ...offsets,
+      ...history,
+    ],
+  };
 }
