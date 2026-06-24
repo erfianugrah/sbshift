@@ -1,0 +1,6 @@
+# Globs (shell case patterns) for files that may be committed unencrypted despite
+# matching a SOPS rule. One pattern per line.
+
+# Throwaway Debezium spike: compose + config use demo credentials from the public
+# quay.io/debezium/example-mysql image (postgres/postgres, debezium/dbz). No real secrets.
+spike/*
