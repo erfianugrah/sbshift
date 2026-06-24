@@ -1,5 +1,9 @@
 import { log } from "../log.ts";
-import type { ProviderHintItem } from "./schema.ts";
+import type { Provenance } from "./schema.ts";
+
+/** Anything `kb drift` can age-check: a stable id + a provenance stamp. Both `ProviderHintItem`
+ *  and `CheckItem` satisfy this, so the drift check spans the whole KB, not just one catalog. */
+export type DriftableItem = { id: string; provenance: Provenance };
 
 /** Default staleness threshold — mirrors the run-time soft-warn cadence in
  *  docs/GUIDED-MIGRATION.md §6 ("this step's knowledge is 90 days old"). */
@@ -38,7 +42,7 @@ function parseISODate(s: string): number {
  * (docs/GUIDED-MIGRATION.md §6). Injectable `now` keeps it deterministic under test.
  */
 export function kbDrift(
-  items: readonly ProviderHintItem[],
+  items: readonly DriftableItem[],
   opts: { now?: Date; maxAgeDays?: number } = {},
 ): DriftReport {
   const maxAgeDays = opts.maxAgeDays ?? DEFAULT_MAX_AGE_DAYS;

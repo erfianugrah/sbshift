@@ -66,11 +66,14 @@ export type ProviderHintItem = z.infer<typeof ProviderHintItem>;
 export const ProviderHints = z.array(ProviderHintItem);
 
 /**
- * A live readiness check, promoted from doctor's inline control flow to data: a single-row
- * SQL probe of one observed value, an expected value to compare it against, plus the phase /
- * severity / remediation / provenance metadata. doctor executes these against a connection
- * (keeping its existing render strings); `guide`'s future live walk runs the same items.
- * docs/GUIDED-MIGRATION.md §4, §10.1.
+ * A live readiness check, promoted from doctor's inline control flow to data: a SQL probe
+ * plus phase / severity / remediation / provenance metadata. Three probe shapes are
+ * supported, by how the result is judged:
+ *   - value:     `detect.column` + `expect` — the column must equal `expect` (e.g. wal_level)
+ *   - existence: neither — the caller reads whether any row came back (e.g. stale slot)
+ *   - multi-col: neither, run via `runProbe` — the caller evaluates the raw row (replica identity)
+ * doctor executes these against a connection (keeping its existing render strings); `guide`'s
+ * future live walk runs the same items. docs/GUIDED-MIGRATION.md §4, §10.1.
  */
 export const CheckItem = z.object({
   /** Stable id, e.g. "source.wal_level_logical". */

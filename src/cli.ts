@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Command } from "commander";
 import { applyEnvFile, type Config, loadConfig, loadSecrets, loadToken } from "./config.ts";
 import { connect, type Db } from "./db.ts";
+import { checks } from "./kb/checks.ts";
 import { DEFAULT_MAX_AGE_DAYS, kbDrift, renderDrift } from "./kb/drift.ts";
 import { buildGuide, guidableProviders, renderGuide } from "./kb/guide.ts";
 import { providerHints } from "./kb/provider-hints.ts";
@@ -389,7 +390,7 @@ kb.command("drift")
   .option("--max-age-days <n>", "staleness threshold in days", String(DEFAULT_MAX_AGE_DAYS))
   .option("--json", "emit the drift report as JSON on stdout", false)
   .action((o) => {
-    const report = kbDrift(providerHints, { maxAgeDays: Number(o.maxAgeDays) });
+    const report = kbDrift([...providerHints, ...checks], { maxAgeDays: Number(o.maxAgeDays) });
     if (o.json) {
       log.toStderr();
       process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

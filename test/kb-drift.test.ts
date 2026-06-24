@@ -1,18 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_MAX_AGE_DAYS, kbDrift } from "../src/kb/drift.ts";
+import { checks } from "../src/kb/checks.ts";
+import { DEFAULT_MAX_AGE_DAYS, type DriftableItem, kbDrift } from "../src/kb/drift.ts";
 import { providerHints } from "../src/kb/provider-hints.ts";
-import type { ProviderHintItem } from "../src/kb/schema.ts";
 
-function item(id: string, lastSynced: string): ProviderHintItem {
-  return {
-    id,
-    provider: "rds-postgres",
-    role: "source",
-    severity: "info",
-    klass: "informed",
-    guidance: "x",
-    provenance: { source: `/docs/${id}.md`, lastSynced },
-  };
+function item(id: string, lastSynced: string): DriftableItem {
+  return { id, provenance: { source: `/docs/${id}.md`, lastSynced } };
 }
 
 describe("kbDrift", () => {
@@ -62,5 +54,14 @@ describe("kbDrift", () => {
     expect(onDate.staleCount).toBe(0);
     const future = kbDrift(providerHints, { now: new Date("2030-01-01T00:00:00Z") });
     expect(future.staleCount).toBe(providerHints.length);
+  });
+
+  test("drift spans BOTH catalogs — provider hints and live checks", () => {
+    const combined = [...providerHints, ...checks];
+    const r = kbDrift(combined, { now });
+    expect(r.rows.length).toBe(combined.length);
+    // every check id is represented, not just provider-hint ids
+    const ids = new Set(r.rows.map((x) => x.id));
+    for (const c of checks) expect(ids.has(c.id)).toBe(true);
   });
 });
