@@ -29,7 +29,7 @@ describe("source-prep catalog", () => {
 describe("preppableEngines", () => {
   test("lists the heterogeneous engines that have a playbook, deduped", () => {
     const engines = preppableEngines();
-    expect(new Set(engines)).toEqual(new Set(["mysql"]));
+    expect(new Set(engines)).toEqual(new Set(["mysql", "sqlserver"]));
     expect(engines.length).toBe(new Set(engines).size);
   });
 });
@@ -82,5 +82,54 @@ describe("MySQL source-prep playbook (§7)", () => {
     expect(ir.phase).toBe("cutover");
     expect(ir.klass).toBe("auto");
     expect(ir.guidance).toContain("MAX(pk)+1");
+  });
+});
+
+describe("SQL Server / Azure SQL source-prep playbook (§7b)", () => {
+  const items = sourcePrepFor("sqlserver");
+  const byId = (id: string) => {
+    const found = items.find((i) => i.id === id);
+    if (!found) throw new Error(`missing sqlserver item: ${id}`);
+    return found;
+  };
+
+  test("covers flavour preflight, CDC enablement, the guided translation, and identity resync", () => {
+    expect(items.map((i) => i.id)).toEqual([
+      "sqlserver.flavour",
+      "sqlserver.cdc_enable",
+      "sqlserver.cdc_retention",
+      "sqlserver.change_tracking_alt",
+      "sqlserver.schema_translation",
+      "sqlserver.identity_resync",
+    ]);
+  });
+
+  test("flavour is a preflight informed item probing EngineEdition (the discovery question)", () => {
+    const f = byId("sqlserver.flavour");
+    expect(f.phase).toBe("preflight");
+    expect(f.klass).toBe("informed");
+    expect(f.detect?.sql).toContain("EngineEdition");
+  });
+
+  test("cdc_enable carries the Azure SQL DB tier gate (Basic/S0-S2 unsupported)", () => {
+    const cdc = byId("sqlserver.cdc_enable");
+    expect(cdc.severity).toBe("fail");
+    expect(cdc.guidance).toContain("sp_cdc_enable_db");
+    expect(cdc.guidance).toContain("vCore");
+    expect(cdc.guidance).toContain("Basic / S0 / S1 / S2 are NOT supported");
+  });
+
+  test("change_tracking is explicitly flagged insufficient for the Debezium path", () => {
+    const ct = byId("sqlserver.change_tracking_alt");
+    expect(ct.severity).toBe("info");
+    expect(ct.guidance).toContain("insufficient");
+  });
+
+  test("schema-translation flags the no-clean-equivalent types and the case-sensitivity trap", () => {
+    const st = byId("sqlserver.schema_translation");
+    expect(st.klass).toBe("guided");
+    expect(st.guidance).toContain("HIERARCHYID");
+    expect(st.guidance).toContain("Case sensitivity");
+    expect(st.guidance).toContain("PL/pgSQL");
   });
 });
