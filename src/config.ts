@@ -23,9 +23,18 @@ const ReconcileTable = z.object({
   hashColumns: z.array(Ident).optional(),
 });
 
+/**
+ * The database engine a source speaks. Selects the data-plane `ReplicationEngine`
+ * (HETEROGENEOUS.md §3): `postgres` → native logical replication (`native-pg`), the
+ * heterogeneous engines → Debezium CDC (`debezium`). Defaults to `postgres` so every
+ * existing config — none of which declares an engine — keeps resolving to today's path.
+ */
+export const SourceEngineSchema = z.enum(["postgres", "mysql", "sqlserver"]).default("postgres");
+export type SourceEngine = z.infer<typeof SourceEngineSchema>;
+
 export const ConfigSchema = z.object({
   /** Supabase project ref of the SOURCE project (for the Management API). */
-  source: z.object({ ref: z.string().min(15) }),
+  source: z.object({ ref: z.string().min(15), engine: SourceEngineSchema }),
   /** Supabase project ref of the TARGET project (for the Management API). */
   target: z.object({ ref: z.string().min(15) }),
 

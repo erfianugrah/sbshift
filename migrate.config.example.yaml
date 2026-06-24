@@ -4,6 +4,7 @@
 
 source:
   ref: aaaaaaaaaaaaaaaaaaaa # SOURCE project ref (20 chars)
+  # engine: postgres # default; mysql/sqlserver need the Debezium engine (not built yet — docs/HETEROGENEOUS.md §5)
 target:
   ref: bbbbbbbbbbbbbbbbbbbb # TARGET project ref (20 chars)
 

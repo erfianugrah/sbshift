@@ -90,11 +90,19 @@ describe("NativePgEngine", () => {
 });
 
 describe("engineFor", () => {
-  test("returns the native-pg engine today (the only impl)", () => {
-    expect(engineFor(cfg).kind).toBe("native-pg");
+  // biome-ignore lint/suspicious/noExplicitAny: minimal cfg shape — engineFor only reads source.engine
+  const cfgWith = (engine: string) => ({ source: { engine } }) as any;
+
+  test("returns the native-pg engine for a postgres source", () => {
+    expect(engineFor(cfgWith("postgres")).kind).toBe("native-pg");
   });
 
   test("returns a fresh instance per call (stateless)", () => {
-    expect(engineFor(cfg)).not.toBe(engineFor(cfg));
+    expect(engineFor(cfgWith("postgres"))).not.toBe(engineFor(cfgWith("postgres")));
+  });
+
+  test("fails loud for heterogeneous engines (Debezium not built yet)", () => {
+    expect(() => engineFor(cfgWith("mysql"))).toThrow(/Debezium replication engine/);
+    expect(() => engineFor(cfgWith("sqlserver"))).toThrow(/not implemented yet/);
   });
 });

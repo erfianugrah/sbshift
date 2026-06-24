@@ -23,6 +23,12 @@ describe("ConfigSchema", () => {
     expect(cfg.configSync.dbPostgres).toBe(false);
     expect(cfg.storage.buckets).toEqual([]);
     expect(cfg.functions.enabled).toBe(false);
+    expect(cfg.source.engine).toBe("postgres");
+  });
+
+  test("rejects an unknown source engine", () => {
+    const bad = { ...base, source: { ref: "a".repeat(20), engine: "oracle" } };
+    expect(ConfigSchema.safeParse(bad).success).toBe(false);
   });
 
   test("rejects a publication name that is not a bare identifier", () => {
