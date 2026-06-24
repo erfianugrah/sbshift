@@ -163,13 +163,19 @@ describe("runProbe — multi-column predicate checks", () => {
     expect(schemaLoaded.detect.sql).toContain("$2");
     expect(schemaLoaded.detect.sql).toContain("relkind");
     // ordinary table
-    expect(await runProbe(rows({ relkind: "r" }), schemaLoaded, ["public", "pastes"])).toEqual({
-      relkind: "r",
-    });
+    expect(
+      await runProbe<{ relkind: string }>(rows({ relkind: "r" }), schemaLoaded, [
+        "public",
+        "pastes",
+      ]),
+    ).toEqual({ relkind: "r" });
     // partitioned table
-    expect(await runProbe(rows({ relkind: "p" }), schemaLoaded, ["public", "events"])).toEqual({
-      relkind: "p",
-    });
+    expect(
+      await runProbe<{ relkind: string }>(rows({ relkind: "p" }), schemaLoaded, [
+        "public",
+        "events",
+      ]),
+    ).toEqual({ relkind: "p" });
     // missing
     expect(await runProbe(rows(), schemaLoaded, ["public", "missing"])).toBeNull();
   });
