@@ -116,6 +116,7 @@ export type PgProvider =
   | "rds-postgres"
   | "aurora-postgres"
   | "neon"
+  | "planetscale-postgres"
   | "azure-postgres"
   | "generic";
 
@@ -144,6 +145,10 @@ export function providerForHost(host: string): PgProvider {
   if (/\.rds\.amazonaws\.com$/i.test(host))
     return /\.cluster-(ro-|custom-)?[a-z0-9]+\./i.test(host) ? "aurora-postgres" : "rds-postgres";
   if (/(^|\.)neon\.tech$/i.test(host)) return "neon";
+  // PlanetScale Postgres hosts: <id>-<region>.horizon.psdb.cloud (public) and
+  // <endpoint>.<region>.private-pg.psdb.cloud / <region>.pg.psdb.cloud (private). The
+  // MySQL product uses *.connect.psdb.cloud, but pgshift only ever sees PG DSNs.
+  if (/\.psdb\.cloud$/i.test(host)) return "planetscale-postgres";
   if (/\.postgres\.database\.azure\.com$/i.test(host)) return "azure-postgres";
   return "generic";
 }

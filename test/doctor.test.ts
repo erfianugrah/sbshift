@@ -97,6 +97,18 @@ describe("classifyConn — provider detection", () => {
     ).toBe("neon");
   });
 
+  test("PlanetScale Postgres host → provider planetscale-postgres", () => {
+    expect(
+      classifyConn("postgresql://postgres.br123:pw@abcd-useast1-1.horizon.psdb.cloud:5432/db")
+        .provider,
+    ).toBe("planetscale-postgres");
+    expect(
+      classifyConn(
+        "postgresql://postgres.br123:pw@ps-main.gcp-us-central1-1.private-pg.psdb.cloud:5432/db",
+      ).provider,
+    ).toBe("planetscale-postgres");
+  });
+
   test("Azure Database for PostgreSQL host → provider azure-postgres", () => {
     expect(
       classifyConn("postgresql://u:pw@myserver.postgres.database.azure.com:5432/postgres").provider,
@@ -130,6 +142,18 @@ describe("providerHint", () => {
 
   test("Neon target → warns scale-to-zero", () => {
     expect(providerHint("neon", "target")).toMatch(/scale to zero/i);
+  });
+
+  test("PlanetScale source → warns port 6432 PgBouncer can't stream WAL", () => {
+    const h = providerHint("planetscale-postgres", "source");
+    expect(h).toContain("5432");
+    expect(h).toMatch(/6432 is PgBouncer/i);
+  });
+
+  test("PlanetScale target → warns 150% disk + copy_data=false", () => {
+    const h = providerHint("planetscale-postgres", "target");
+    expect(h).toMatch(/150%/);
+    expect(h).toContain("copy_data=false");
   });
 
   test("Azure source → mentions wal_level=logical + failover slots", () => {

@@ -232,6 +232,13 @@ export function providerHint(provider: PgProvider, role: "source" | "target"): s
             "reboot. Optional `aurora.enhanced_logical_replication=1` avoids needing REPLICA IDENTITY " +
             "FULL but INVALIDATES existing logical slots when toggled (recreate them) and raises IOPS."
         : null;
+    case "planetscale-postgres":
+      return role === "source"
+        ? "PlanetScale Postgres: the subscription CONNECTION must use the DIRECT port 5432 — " +
+            "port 6432 is PgBouncer and cannot stream WAL. Set logical-replication params in " +
+            "Cluster > Parameters."
+        : "PlanetScale Postgres target: provision disk ≥150% of source size; after a manual " +
+            "schema import, create the subscription with copy_data=false (and resync sequences).";
     case "neon":
       return role === "source"
         ? "Neon: enabling logical replication is IRREVERSIBLE and restarts computes; " +
