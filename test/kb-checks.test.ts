@@ -155,4 +155,22 @@ describe("runProbe — multi-column predicate checks", () => {
     expect(replicaIdentity.detect.column).toBeUndefined();
     expect(replicaIdentity.expect).toBeUndefined();
   });
+
+  test("target.schema_loaded: target-prep probe returning relkind for the caller to branch on", async () => {
+    const schemaLoaded = check("target.schema_loaded");
+    expect(schemaLoaded).toMatchObject({ phase: "target-prep", severity: "fail" });
+    expect(schemaLoaded.detect.sql).toContain("$1");
+    expect(schemaLoaded.detect.sql).toContain("$2");
+    expect(schemaLoaded.detect.sql).toContain("relkind");
+    // ordinary table
+    expect(await runProbe(rows({ relkind: "r" }), schemaLoaded, ["public", "pastes"])).toEqual({
+      relkind: "r",
+    });
+    // partitioned table
+    expect(await runProbe(rows({ relkind: "p" }), schemaLoaded, ["public", "events"])).toEqual({
+      relkind: "p",
+    });
+    // missing
+    expect(await runProbe(rows(), schemaLoaded, ["public", "missing"])).toBeNull();
+  });
 });

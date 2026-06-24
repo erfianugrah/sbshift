@@ -63,6 +63,28 @@ const RAW: CheckItem[] = [
     },
   },
   {
+    id: "target.schema_loaded",
+    phase: "target-prep",
+    severity: "fail",
+    title: "target schema loaded",
+    // per-table probe: $1 schema, $2 table. relkind distinguishes ordinary ('r') from
+    // partitioned ('p') tables; absence means the table isn't there. Evaluated by the caller.
+    detect: {
+      sql:
+        "SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+        "WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind IN ('r','p')",
+    },
+    guidance:
+      "Logical replication does not carry DDL — the target schema must be created BEFORE replicate " +
+      "(load it via your migration tool / pg_dump --schema-only / `pgshift bootstrap`). A missing " +
+      "table blocks the initial copy; a partitioned table replicates but reconcile scans only the " +
+      "partition root.",
+    provenance: {
+      source: "/docs/postgres/sql-createpublication.md",
+      lastSynced: "2026-06-24",
+    },
+  },
+  {
     id: "source.wal_level_logical",
     phase: "source-prep",
     severity: "fail",

@@ -417,12 +417,11 @@ async function targetChecks(
 
   // is the schema loaded on the target yet? (logical replication does NOT carry DDL)
   // M-10: also check for partitioned tables (relkind='p') and warn about ONLY limitation.
+  const tq = (sql: string, p?: readonly unknown[]) => target.unsafe(sql, (p ?? []) as never[]);
+  const schemaLoaded = check("target.schema_loaded");
   for (const qt of cfg.replication.tables) {
     const [schema, table] = qt.split(".");
-    const [row] = await target`
-      SELECT c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = ${schema ?? ""} AND c.relname = ${table ?? ""}
-        AND c.relkind IN ('r','p')`;
+    const row = await runProbe<{ relkind: string }>(tq, schemaLoaded, [schema ?? "", table ?? ""]);
     if (!row) {
       s.fail(
         `target table ${qt} MISSING — load the schema on the target before replicate (DDL is not replicated)`,
