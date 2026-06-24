@@ -1,5 +1,5 @@
 import type { Config, Secrets } from "../config.ts";
-import { classifyConn, connect, type Db } from "../db.ts";
+import { classifyConn, connect, type Db, type PgProvider } from "../db.ts";
 import { log } from "../log.ts";
 import { extensionStatements, missingExtensions } from "./bootstrap.ts";
 import {
@@ -120,7 +120,16 @@ export async function doctor(
 
   const src = classifyConn(secrets.SOURCE_DB_URL);
   const tgt = classifyConn(secrets.TARGET_DB_URL);
-  log.detail(`source conn ${src.host}:${src.port}   target conn ${tgt.host}:${tgt.port}`);
+  log.detail(
+    `source conn ${src.host}:${src.port} (${src.provider})   ` +
+      `target conn ${tgt.host}:${tgt.port} (${tgt.provider})`,
+  );
+  const srcHint = providerHint(src.provider, "source");
+  if (srcHint) log.detail(`source provider note — ${srcHint}`);
+  if (!opts.sourceOnly) {
+    const tgtHint = providerHint(tgt.provider, "target");
+    if (tgtHint) log.detail(`target provider note — ${tgtHint}`);
+  }
   const repl = secrets.SOURCE_REPLICATION_URL ? classifyConn(secrets.SOURCE_REPLICATION_URL) : null;
   if (src.isPooler) {
     if (repl?.isSupabaseDirect)
@@ -200,6 +209,45 @@ async function probe(db: Db): Promise<{ ok: boolean; error?: string }> {
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Provider-specific logical-replication enablement guidance. All targets are native
+ * Postgres; only the *how-to-enable* differs. Returns null for `supabase` (covered by the
+ * pooler/direct ladder) and `generic` (self-hosted; the generic wal_level check suffices).
+ * Grounded in docs/GUIDED-MIGRATION.md §8 — keep provenance in sync via `kb` (planned).
+ */
+export function providerHint(provider: PgProvider, role: "source" | "target"): string | null {
+  switch (provider) {
+    case "rds-postgres":
+      return role === "source"
+        ? "RDS PostgreSQL: logical replication needs `rds.logical_replication=1` in a CUSTOM " +
+            "parameter group. It is a STATIC parameter — the instance must be REBOOTED to apply " +
+            "it (this sets wal_level=logical, max_wal_senders, max_replication_slots)."
+        : null;
+    case "aurora-postgres":
+      return role === "source"
+        ? "Aurora PostgreSQL: set `rds.logical_replication=1` in the CLUSTER parameter group, then " +
+            "reboot. Optional `aurora.enhanced_logical_replication=1` avoids needing REPLICA IDENTITY " +
+            "FULL but INVALIDATES existing logical slots when toggled (recreate them) and raises IOPS."
+        : null;
+    case "neon":
+      return role === "source"
+        ? "Neon: enabling logical replication is IRREVERSIBLE and restarts computes; " +
+            "max_wal_senders/max_replication_slots are pinned at 10, and INACTIVE slots are dropped " +
+            "after ~40h — a stalled migration loses its slot (the watch watchdog must catch this)."
+        : "Neon target: inbound logical replication (Neon as subscriber) is supported — ensure the " +
+            "subscriber compute does not scale to zero mid-copy.";
+    case "azure-postgres":
+      return role === "source"
+        ? "Azure Database for PostgreSQL: set server parameter `wal_level=logical` + restart; raise " +
+            "max_replication_slots/max_wal_senders. PG17+ preserves slots across failover via " +
+            "sync_replication_slots+hot_standby_feedback; PG≤16 needs the PG Failover Slots extension. " +
+            "Unused slots are auto-dropped near 95% storage — keep the slot consumed."
+        : null;
+    default:
+      return null;
   }
 }
 

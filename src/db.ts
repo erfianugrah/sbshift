@@ -104,10 +104,27 @@ export function connect(
   };
 }
 
+/**
+ * Managed-Postgres provider behind a connection string, by host pattern. Drives
+ * provider-specific doctor/guide guidance (logical-replication enablement differs per
+ * platform). All are native PostgreSQL — the replication engine is unchanged; only the
+ * enablement checklist forks. Heterogeneous engines (MySQL/SQL Server) are NOT providers
+ * here — they are a separate ReplicationEngine (see docs/HETEROGENEOUS.md).
+ */
+export type PgProvider =
+  | "supabase"
+  | "rds-postgres"
+  | "aurora-postgres"
+  | "neon"
+  | "azure-postgres"
+  | "generic";
+
 /** What kind of endpoint a connection string points at — drives doctor warnings. */
 export interface ConnInfo {
   host: string;
   port: number;
+  /** Managed-Postgres provider inferred from the host (native logical replication for all). */
+  provider: PgProvider;
   /** Supavisor pooler host (…​.pooler.supabase.com) — CANNOT stream logical replication. */
   isPooler: boolean;
   /** Supavisor TRANSACTION-mode pooler (port 6543) — also breaks `pg_dump`/`pg_dumpall`
@@ -120,6 +137,17 @@ export interface ConnInfo {
   ref?: string;
 }
 
+/** Infer the managed-Postgres provider from a host. Order matters: Aurora cluster
+ *  endpoints are a subset of `*.rds.amazonaws.com`, so test the `.cluster-` marker first. */
+export function providerForHost(host: string): PgProvider {
+  if (/(^|\.)supabase\.(co|com)$/i.test(host)) return "supabase";
+  if (/\.rds\.amazonaws\.com$/i.test(host))
+    return /\.cluster-(ro-|custom-)?[a-z0-9]+\./i.test(host) ? "aurora-postgres" : "rds-postgres";
+  if (/(^|\.)neon\.tech$/i.test(host)) return "neon";
+  if (/\.postgres\.database\.azure\.com$/i.test(host)) return "azure-postgres";
+  return "generic";
+}
+
 export function classifyConn(url: string): ConnInfo {
   const u = new URL(url);
   const host = u.hostname;
@@ -129,6 +157,7 @@ export function classifyConn(url: string): ConnInfo {
   return {
     host,
     port,
+    provider: providerForHost(host),
     isPooler,
     isTransactionPooler: isPooler && port === 6543,
     isSupabaseDirect: Boolean(m),

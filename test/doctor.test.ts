@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { classifyConn } from "../src/db.ts";
-import { diffHashColumns, externalDeps, type Fk } from "../src/steps/doctor.ts";
+import { diffHashColumns, externalDeps, type Fk, providerHint } from "../src/steps/doctor.ts";
 
 describe("classifyConn", () => {
   test("direct Supabase host → ref extracted, not pooler", () => {
@@ -48,6 +48,105 @@ describe("classifyConn", () => {
     const c = classifyConn("postgresql://u:p@source:5432/postgres");
     expect(c.isPooler).toBe(false);
     expect(c.isSupabaseDirect).toBe(false);
+  });
+});
+
+describe("classifyConn — provider detection", () => {
+  test("Supabase direct host → provider supabase", () => {
+    expect(
+      classifyConn("postgresql://postgres:pw@db.abcdefghijklmnop.supabase.co:5432/postgres")
+        .provider,
+    ).toBe("supabase");
+  });
+
+  test("Supabase pooler host → provider supabase", () => {
+    expect(
+      classifyConn(
+        "postgresql://postgres.ref:pw@aws-1-eu-central-1.pooler.supabase.com:5432/postgres",
+      ).provider,
+    ).toBe("supabase");
+  });
+
+  test("RDS PostgreSQL instance host → provider rds-postgres", () => {
+    expect(
+      classifyConn("postgresql://u:pw@mydb.abc123xyz.eu-west-1.rds.amazonaws.com:5432/postgres")
+        .provider,
+    ).toBe("rds-postgres");
+  });
+
+  test("Aurora cluster endpoint → provider aurora-postgres (not plain rds)", () => {
+    const writer = classifyConn(
+      "postgresql://u:pw@mycluster.cluster-abc123.eu-west-1.rds.amazonaws.com:5432/postgres",
+    );
+    expect(writer.provider).toBe("aurora-postgres");
+    const reader = classifyConn(
+      "postgresql://u:pw@mycluster.cluster-ro-abc123.eu-west-1.rds.amazonaws.com:5432/postgres",
+    );
+    expect(reader.provider).toBe("aurora-postgres");
+  });
+
+  test("Neon host → provider neon", () => {
+    expect(
+      classifyConn("postgresql://u:pw@ep-cool-darkness-123456.us-east-2.aws.neon.tech/neondb")
+        .provider,
+    ).toBe("neon");
+    expect(
+      classifyConn(
+        "postgresql://u:pw@ep-cool-darkness-123456-pooler.us-east-2.aws.neon.tech/neondb",
+      ).provider,
+    ).toBe("neon");
+  });
+
+  test("Azure Database for PostgreSQL host → provider azure-postgres", () => {
+    expect(
+      classifyConn("postgresql://u:pw@myserver.postgres.database.azure.com:5432/postgres").provider,
+    ).toBe("azure-postgres");
+  });
+
+  test("unknown host → provider generic", () => {
+    expect(classifyConn("postgresql://u:p@localhost:5432/postgres").provider).toBe("generic");
+    expect(classifyConn("postgresql://u:p@source:5432/postgres").provider).toBe("generic");
+  });
+});
+
+describe("providerHint", () => {
+  test("RDS source → mentions custom parameter group + reboot", () => {
+    const h = providerHint("rds-postgres", "source");
+    expect(h).toContain("rds.logical_replication=1");
+    expect(h).toMatch(/REBOOT/i);
+  });
+
+  test("Aurora source → mentions cluster parameter group + enhanced slot caveat", () => {
+    const h = providerHint("aurora-postgres", "source");
+    expect(h).toMatch(/CLUSTER parameter group/i);
+    expect(h).toMatch(/INVALIDATES/i);
+  });
+
+  test("Neon source → warns irreversible + 40h slot reaping", () => {
+    const h = providerHint("neon", "source");
+    expect(h).toMatch(/IRREVERSIBLE/i);
+    expect(h).toContain("40h");
+  });
+
+  test("Neon target → warns scale-to-zero", () => {
+    expect(providerHint("neon", "target")).toMatch(/scale to zero/i);
+  });
+
+  test("Azure source → mentions wal_level=logical + failover slots", () => {
+    const h = providerHint("azure-postgres", "source");
+    expect(h).toContain("wal_level=logical");
+    expect(h).toMatch(/PG Failover Slots/i);
+  });
+
+  test("supabase + generic → no hint (handled elsewhere / generic check suffices)", () => {
+    expect(providerHint("supabase", "source")).toBeNull();
+    expect(providerHint("generic", "source")).toBeNull();
+  });
+
+  test("providers without a target-specific note return null for target role", () => {
+    expect(providerHint("rds-postgres", "target")).toBeNull();
+    expect(providerHint("aurora-postgres", "target")).toBeNull();
+    expect(providerHint("azure-postgres", "target")).toBeNull();
   });
 });
 
