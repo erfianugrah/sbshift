@@ -573,4 +573,6 @@ test/                 *.test.ts (unit) + integration.test.ts (inline itest) + sc
                       + annoying-schema.ts (their SEPARATE bigint-IDENTITY fixture — see its header)
 docs/RUNBOOK.md       the step-by-step runbook; §9 cutover, §12 rollback
 docs/MIGRATION-SCOPE.md  exhaustive what-migrates/what-doesn't (consolidates the 3 guides)
+docs/GUIDED-MIGRATION.md design: guided knowledge-bearing advisor for heterogeneous → PG/Supabase
+docs/HETEROGENEOUS.md    design: Debezium data plane behind a ReplicationEngine interface
 ```
