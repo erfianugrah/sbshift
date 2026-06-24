@@ -34,10 +34,8 @@ services:
       POSTGRES_DB: target
     ports:
       - "55432:5432" # host-side, for the harness's row assertions
-    volumes:
-      # production runs schema.evolution=none and PRE-CREATES the target from the guided draft;
-      # the harness mirrors that — this init script is the stand-in for the translated schema.
-      - ./init-target.sql:/docker-entrypoint-initdb.d/init-target.sql:ro
+    # No init script: the harness GENERATES the target schema from the MySQL source via the
+    # schema translator (draftTargetSchema), mirroring production's pre-create-from-guided-draft.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d target"]
       interval: 5s

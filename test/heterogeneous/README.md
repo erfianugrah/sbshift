@@ -20,18 +20,20 @@ bun run test/heterogeneous/harness.ts
 The harness self-contains the whole sequence (exit 0 = PASS):
 
 1. **build** the engine image `pgshift/debezium-server:3.6.0.Beta2` from `images/debezium-server/`;
-2. **up** MySQL (`example-mysql`, 4 seeded `inventory.customers`) + Postgres (target, schema
-   pre-created by `init-target.sql`) on the `pgshift-dbz-it` network, published to host ports
-   `53306` / `55432`;
-3. **replicate** — `engine.replicate()` stages the rendered `application.properties`, `docker
+2. **up** MySQL (`example-mysql`, 4 seeded `inventory.customers`) + an EMPTY Postgres target on
+   the `pgshift-dbz-it` network, published to host ports `53306` / `55432`;
+3. **schema-translate** — `draftTargetSchema()` reads the MySQL `information_schema`, drafts the
+   Postgres DDL (logging any guided decisions), and applies it to the target (production writes it
+   for human sign-off; the harness auto-applies);
+4. **replicate** — `engine.replicate()` stages the rendered `application.properties`, `docker
    run`s the Debezium container onto `pgshift-dbz-it`, and waits for `/q/health`;
-4. **snapshot assert** — the 4 seeded rows land in `public.customers`;
-5. **CDC assert** — a row INSERTed in MySQL streams through the binlog and appears in Postgres;
-6. **reconcile** — `engine.reconcile()` (count + portable aggregates via `mysql2`) reports PASS;
-7. **watch** — `engine.watch()` confirms connector health + caught-up, resolves;
-8. **cutover** — `engine.cutover()` runs the binlog write-stop gate + drain + sequence resync and
+5. **snapshot assert** — the 4 seeded rows land in `public.customers`;
+6. **CDC assert** — a row INSERTed in MySQL streams through the binlog and appears in Postgres;
+7. **reconcile** — `engine.reconcile()` (count + portable aggregates via `mysql2`) reports PASS;
+8. **watch** — `engine.watch()` confirms connector health + caught-up, resolves;
+9. **cutover** — `engine.cutover()` runs the binlog write-stop gate + drain + sequence resync and
    stops the container;
-9. **teardown** — `engine.teardown()` removes the container + offset volume; compose `down -v`.
+10. **teardown** — `engine.teardown()` removes the container + offset volume; compose `down -v`.
 
 reconcile/watch/cutover run in the host process and query MySQL directly, so the harness points
 `SOURCE_DB_URL` at the published `127.0.0.1:53306` for them (replicate's rendered config keeps the

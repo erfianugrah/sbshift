@@ -18,6 +18,8 @@ import { execSync } from "node:child_process";
 import postgres from "postgres";
 import { ConfigSchema } from "../../src/config.ts";
 import { DebeziumEngine } from "../../src/engine/debezium.ts";
+import { connectMySql } from "../../src/engine/mysql.ts";
+import { draftTargetSchema } from "../../src/engine/schema-translate.ts";
 
 const COMPOSE = ["docker", "compose", "-f", "test/heterogeneous/docker-compose.yml"];
 const NET = "pgshift-dbz-it";
@@ -73,6 +75,18 @@ async function main() {
   const pg = postgres(TARGET_HOST_URL, { idle_timeout: 5 });
   let failed = false;
   try {
+    console.log("── schema-translate: draft + apply the target schema from MySQL ──");
+    const my = await connectMySql("mysql://debezium:dbz@127.0.0.1:53306/inventory");
+    const draft = await draftTargetSchema(my, "inventory", ["customers"]);
+    await my.end();
+    console.log(draft.sql);
+    if (draft.decisions.length > 0) {
+      console.log("guided decisions (would gate cutover in production):");
+      for (const d of draft.decisions) console.log(`  - ${d.table}.${d.column}: ${d.review}`);
+    }
+    await pg.unsafe(draft.sql); // production writes this for human sign-off; the harness auto-applies
+    console.log("target schema applied");
+
     console.log("── replicate: launch Debezium + wait healthy ──");
     await new DebeziumEngine().replicate(NODB, NODB, cfg, secrets);
 
