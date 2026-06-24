@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -98,3 +99,29 @@ jobs:
       - name: Tear down compose
         if: always()
         run: docker compose -f docker-compose.test.yml down -v --remove-orphans
+
+  # Heterogeneous (Debezium, no-Kafka) engines end-to-end. SEPARATE from the PG jobs on purpose:
+  # it builds + runs the pinned PRE-RELEASE Debezium Server image against real MySQL / SQL Server,
+  # so it is slower and a red here must NEVER gate the stable PG core above. Maturity-matched:
+  #   - MySQL is beta  → the step fails the job (it is harness-proven; a regression should show red).
+  #   - SQL Server is alpha → continue-on-error until its harness has a proven green run, then flip.
+  # Both harnesses stand up + tear down their own compose network (see test/heterogeneous/README.md).
+  heterogeneous:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The harnesses shell out to `docker build` / `docker compose` and import postgres + mssql,
+      # so host node_modules must exist before they run.
+      - run: bun install --frozen-lockfile
+
+      - name: 'MySQL → Postgres harness (beta — gating)'
+        run: bun run test/heterogeneous/harness.ts
+
+      - name: 'SQL Server → Postgres harness (alpha — non-gating until first green run)'
+        continue-on-error: true
+        run: bun run test/heterogeneous/harness-sqlserver.ts

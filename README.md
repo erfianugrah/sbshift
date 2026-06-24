@@ -16,6 +16,25 @@ non-Supabase migrations.
 It owns the one piece nothing else automates: the **data-replication state machine +
 reconciliation + WAL watchdog**.
 
+## Migration paths & maturity
+
+pgshift has one control plane (`doctor → bootstrap → replicate → watch → reconcile → cutover →
+verify → teardown`) behind a `ReplicationEngine` seam, with one engine per source database. Read
+this table first — **the maturity differs sharply by source**:
+
+| Source → target | Engine | Maturity | What backs the claim |
+|---|---|---|---|
+| **Postgres → Postgres / Supabase** | native logical replication | **Stable — production-usable** | End-to-end in CI every push: real logical replication on a throwaway PG pair, real `pg_dump`/`pg_dumpall`/`psql` bootstrap, and negative-path safety gates that **must fire** (concurrent-write reconcile, WAL-bloat watchdog abort, cutover-refuses-under-writes). Byte-exact `row::text` checksum reconcile. |
+| **MySQL → Postgres** | Debezium CDC (no Kafka) | **Beta — runnable with eyes open** | Full `DebeziumEngine` lifecycle + the guided `translate` schema gate + live `doctor` engine-prep checks, **harness-verified** against real Debezium 3.6.0.Beta2 + MySQL 8.2 + Postgres 16. Caveats are loud, not hidden: reconcile is **downgraded** to count + portable aggregates (no byte-exact hash); Debezium is pinned to a **pre-release**; schema translation never auto-applies (cutover gated on human sign-off). |
+| **SQL Server / Azure SQL → Postgres** | Debezium CDC (no Kafka) | **Alpha — not yet proven live** | Engine, T-SQL schema translator, CDC `max_lsn` write-stop gate, and live `doctor` CDC checks are built and **unit-tested**, but the end-to-end Docker harness (`test/heterogeneous/harness-sqlserver.ts`) has **not had a green real run yet**. Known gaps: Azure SQL DTU/vCore tier gate, CDC retention watchdog. Treat as alpha until the harness passes. |
+
+The **MySQL** and **SQL Server** engines are heterogeneous (different source DB, not Postgres);
+their design + the per-engine source-prep playbooks live in
+[`docs/HETEROGENEOUS.md`](docs/HETEROGENEOUS.md) and [`docs/GUIDED-MIGRATION.md`](docs/GUIDED-MIGRATION.md).
+The rest of this README documents the **Postgres → Postgres / Supabase** path (the stable one); the
+command vocabulary (`doctor`, `replicate`, `watch`, `reconcile`, `cutover`, `teardown`) is identical
+across engines, with `translate` added for the heterogeneous schema-translation gate.
+
 ## Why this exists
 
 A cross-region migration is ~7 independent workstreams. Most are already covered; this tool
