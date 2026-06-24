@@ -203,7 +203,9 @@ The SQL Server engine is implemented end-to-end and forks cleanly off `cfg.sourc
   a **CDC-`max_lsn` write-stop gate** (`sys.fn_cdc_get_max_lsn`) in place of the binlog position.
 - **doctor** — the engine-prep playbook runs LIVE for SQL Server (EngineEdition CDC-capable +
   `is_cdc_enabled` asserts).
-- **harness** — `test/heterogeneous/harness-sqlserver.ts` + `docker-compose.sqlserver.yml`.
+- **harness** — `test/heterogeneous/harness-sqlserver.ts` + `docker-compose.sqlserver.yml`,
+  **green end-to-end in CI** (the `heterogeneous` job) against real SQL Server 2022 (Developer,
+  CDC) + Debezium 3.6.0.Beta2 + Postgres 16.
 
 The Debezium **SQL Server connector** captures from SQL Server **CDC change-tables**, not a
 binlog — so the source-prep playbook (see [`GUIDED-MIGRATION.md`](GUIDED-MIGRATION.md) §7b)

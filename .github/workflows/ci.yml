@@ -102,9 +102,9 @@ jobs:
 
   # Heterogeneous (Debezium, no-Kafka) engines end-to-end. SEPARATE from the PG jobs on purpose:
   # it builds + runs the pinned PRE-RELEASE Debezium Server image against real MySQL / SQL Server,
-  # so it is slower and a red here must NEVER gate the stable PG core above. Maturity-matched:
-  #   - MySQL is beta  → the step fails the job (it is harness-proven; a regression should show red).
-  #   - SQL Server is alpha → continue-on-error until its harness has a proven green run, then flip.
+  # so it is slower and a red here must NEVER gate the stable PG core above. Both engines are now
+  # harness-proven (MySQL + SQL Server both had green end-to-end runs here), so both steps gate the
+  # job — a regression in either should show red.
   # Both harnesses stand up + tear down their own compose network (see test/heterogeneous/README.md).
   heterogeneous:
     runs-on: ubuntu-latest
@@ -122,6 +122,5 @@ jobs:
       - name: 'MySQL → Postgres harness (beta — gating)'
         run: bun run test/heterogeneous/harness.ts
 
-      - name: 'SQL Server → Postgres harness (alpha — non-gating until first green run)'
-        continue-on-error: true
+      - name: 'SQL Server → Postgres harness (beta — gating)'
         run: bun run test/heterogeneous/harness-sqlserver.ts
