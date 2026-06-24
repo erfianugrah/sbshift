@@ -3,6 +3,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { Command } from "commander";
 import { applyEnvFile, type Config, loadConfig, loadSecrets, loadToken } from "./config.ts";
 import { connect, type Db } from "./db.ts";
+import { engineFor } from "./engine/index.ts";
 import { checks } from "./kb/checks.ts";
 import { DEFAULT_MAX_AGE_DAYS, kbDrift, renderDrift } from "./kb/drift.ts";
 import { buildGuide, guidableProviders, renderGuide } from "./kb/guide.ts";
@@ -18,18 +19,13 @@ import { bootstrap } from "./steps/bootstrap.ts";
 import { claim } from "./steps/claim.ts";
 import { transferFunctions, transferStorage } from "./steps/cli-wrappers.ts";
 import { configSync } from "./steps/config-sync.ts";
-import { cutover } from "./steps/cutover.ts";
 import { doctor } from "./steps/doctor.ts";
 import { preflight } from "./steps/preflight.ts";
 import { provision } from "./steps/provision.ts";
-import { reconcile } from "./steps/reconcile.ts";
-import { replicate } from "./steps/replicate.ts";
 import { PHASES, type Phase, run } from "./steps/run.ts";
 import { sandboxDown, sandboxStatus, sandboxUp } from "./steps/sandbox.ts";
 import { printStatus, status } from "./steps/status.ts";
-import { teardown } from "./steps/teardown.ts";
 import { type FailOn, verify } from "./steps/verify.ts";
-import { watch } from "./steps/watch.ts";
 
 const { version } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -202,12 +198,16 @@ program
 program
   .command("replicate")
   .description("create publication + slot + subscription (starts initial sync)")
-  .action(() => withDb(({ source, target }, cfg) => replicate(source, target, cfg, loadSecrets())));
+  .action(() =>
+    withDb(({ source, target }, cfg) =>
+      engineFor(cfg).replicate(source, target, cfg, loadSecrets()),
+    ),
+  );
 
 program
   .command("watch")
   .description("poll initial-sync state + WAL bloat watchdog until all tables ready")
-  .action(() => withDb(({ source, target }, cfg) => watch(source, target, cfg)));
+  .action(() => withDb(({ source, target }, cfg) => engineFor(cfg).watch(source, target, cfg)));
 
 program
   .command("reconcile")
@@ -219,7 +219,7 @@ program
   .option("--out-dir <path>", "directory for the reconcile JSON report", "ledger")
   .action((o) =>
     withDb(async ({ source, target }, cfg) => {
-      const ok = await reconcile(source, target, cfg, {
+      const ok = await engineFor(cfg).reconcile(source, target, cfg, {
         mode: o.mode === "full" ? "full" : "chunked",
         buckets: Number(o.buckets),
         maxExamples: Number(o.maxExamples),
@@ -235,14 +235,14 @@ program
   .option("--max-lag-wait <sec>", "seconds to wait for lag to drain", "300")
   .action((o) =>
     withDb(({ source, target }, cfg) =>
-      cutover(source, target, cfg, { maxLagWaitSec: Number(o.maxLagWait) }),
+      engineFor(cfg).cutover(source, target, cfg, { maxLagWaitSec: Number(o.maxLagWait) }),
     ),
   );
 
 program
   .command("teardown")
   .description("drop subscription/slot/publication safely (idempotent)")
-  .action(() => withDb(({ source, target }, cfg) => teardown(source, target, cfg)));
+  .action(() => withDb(({ source, target }, cfg) => engineFor(cfg).teardown(source, target, cfg)));
 
 program
   .command("config-sync")

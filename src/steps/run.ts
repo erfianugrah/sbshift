@@ -1,11 +1,9 @@
 import type { Config, Secrets } from "../config.ts";
 import type { Db } from "../db.ts";
+import { engineFor, type ReplicationEngine } from "../engine/index.ts";
 import { log } from "../log.ts";
-import { cutover } from "./cutover.ts";
 import { preflight } from "./preflight.ts";
-import { type ReconcileMode, reconcile } from "./reconcile.ts";
-import { replicate } from "./replicate.ts";
-import { watch } from "./watch.ts";
+import type { ReconcileMode } from "./reconcile.ts";
 
 /**
  * Autonomous, non-interactive pipeline runner — the thing you put in a GitHub
@@ -73,12 +71,13 @@ export async function run(
     ? (o: Record<string, unknown>) => process.stdout.write(`${JSON.stringify(o)}\n`)
     : (_o: Record<string, unknown>) => {};
 
+  const engine = engineFor(cfg);
   const results: PhaseResult[] = [];
   for (const phase of phases) {
     emit({ event: "phase_start", phase, ts: new Date().toISOString() });
     const t0 = Date.now();
     try {
-      await runPhase(phase, source, target, cfg, secrets, opts);
+      await runPhase(engine, phase, source, target, cfg, secrets, opts);
       const ms = Date.now() - t0;
       results.push({ phase, ok: true, ms });
       emit({ event: "phase_end", phase, ok: true, ms });
@@ -98,6 +97,7 @@ export async function run(
 }
 
 async function runPhase(
+  engine: ReplicationEngine,
   phase: Phase,
   source: Db,
   target: Db,
@@ -106,18 +106,22 @@ async function runPhase(
   opts: RunOptions,
 ): Promise<void> {
   switch (phase) {
+    // preflight is a pre-check, not a data-plane op — it stays outside the engine seam.
     case "preflight":
       return preflight(source, target, cfg);
     case "replicate":
-      return replicate(source, target, cfg, secrets);
+      return engine.replicate(source, target, cfg, secrets);
     case "watch":
-      return watch(source, target, cfg);
+      return engine.watch(source, target, cfg);
     case "reconcile": {
-      const ok = await reconcile(source, target, cfg, { ...opts.reconcile, outDir: opts.outDir });
+      const ok = await engine.reconcile(source, target, cfg, {
+        ...opts.reconcile,
+        outDir: opts.outDir,
+      });
       if (!ok) throw new Error("reconcile reported a mismatch");
       return;
     }
     case "cutover":
-      return cutover(source, target, cfg, { maxLagWaitSec: opts.maxLagWaitSec ?? 300 });
+      return engine.cutover(source, target, cfg, { maxLagWaitSec: opts.maxLagWaitSec ?? 300 });
   }
 }
