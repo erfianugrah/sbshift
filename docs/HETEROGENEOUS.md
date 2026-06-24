@@ -122,6 +122,33 @@ MySQL → Supabase, single source, behind the `ReplicationEngine` seam:
 Effort: weeks, not days, dominated by schema-translation drafting (§7 of the guided spec)
 and the reconcile downgrade. The CDC machinery itself is borrowed.
 
+### Delivery vehicle — DECIDED (2026-06-24)
+
+The spike (finding #1) left the delivery vehicle open: pin a 3.6 pre-release, wait for 3.6 GA,
+or fall back to single-node Kafka Connect. Resolved by checking the actual gating dependency:
+
+- `io.debezium:debezium-server-jdbc` on Maven Central — newest **`3.6.0.CR1`**, no `3.6.0.Final`
+  (`maven-metadata.xml` lastUpdated 2026-06-23). The no-Kafka JDBC sink exists only from 3.6.0.Alpha2.
+- quay.io/debezium/server images — the 3.6 line is published only up to **`3.6.0.Beta2`** (no CR1
+  or Final image); the newest GA `Final` overall is `3.5.2.Final`, which has **no** JDBC sink.
+
+So **wait-for-GA is blocked** (3.6 GA unscheduled; CR1 jar only landed the day before) and the
+**Kafka-Connect fallback reintroduces the Kafka dependency §1 rejected**. Decision: **pin the 3.6
+pre-release — `3.6.0.Beta2`**. NOT the newer CR1 jar: the custom image layers the JDBC-sink jar
+onto the stock server image (finding #3), so the sink jar must MATCH the server-core version in
+the base image — and the base image tops out at Beta2, so a CR1 jar would run on a Beta2 core (an
+unsupported skew). Beta2 is the highest version available as BOTH a server image AND a sink jar,
+and is exactly the combo the spike proved end-to-end. The pre-release risk is acceptable because
+finding #2 already makes pgshift's reconcile + fail-closed cutover load-bearing — the engine never
+trusts the sink's delivery guarantees, GA or not. The pin lives as a typed constant in
+[`src/engine/debezium-runtime.ts`](../src/engine/debezium-runtime.ts) (`DEBEZIUM_SERVER_VERSION`,
+`DEBEZIUM_RUNTIME_GA=false`); re-pin upward only when a matching image+jar pair ships (ideally
+`3.6.0.Final`) and flip the GA flag.
+
+With the vehicle decided, the remaining runtime work is the container lifecycle (start/watch/
+teardown), lag/offset monitoring for `watch`, and the cutover write-stop gate — not a research
+question.
+
 Source priority by demand: MySQL / Aurora-MySQL first, then SQL Server / Azure SQL (Debezium
 SQL Server connector), then MongoDB (document→relational, a separate sub-project), Oracle
 last.
