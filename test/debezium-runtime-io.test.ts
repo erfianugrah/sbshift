@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ConfigSchema, type Secrets } from "../src/config.ts";
 import {
   DebeziumEngine,
@@ -14,6 +17,7 @@ import {
   debeziumVolumeRmArgv,
 } from "../src/engine/debezium-runspec.ts";
 import type { MySqlConn } from "../src/engine/mysql.ts";
+import { buildManifest, schemaArtifactPaths, signOffSchema } from "../src/steps/translate.ts";
 
 // biome-ignore lint/suspicious/noExplicitAny: opaque Db sentinels — debezium never touches them
 const NODB = {} as any;
@@ -282,8 +286,18 @@ describe("DebeziumEngine.reconcile (mock source + fake target)", () => {
   else process.env.SOURCE_DB_URL = origUrl;
 });
 
+/** A throwaway out-dir holding a SIGNED-OFF schema manifest so cutover's gate passes. */
+function signedSchemaDir(cfg: ReturnType<typeof mysqlCfg>): string {
+  const outDir = mkdtempSync(join(tmpdir(), "pgshift-cutover-schema-"));
+  const m = buildManifest(cfg, { sql: "CREATE TABLE ...;", decisions: [] });
+  writeFileSync(schemaArtifactPaths(outDir).manifest, `${JSON.stringify(m, null, 2)}\n`);
+  signOffSchema(outDir);
+  return outDir;
+}
+
 describe("DebeziumEngine.cutover (mock source + fake target)", () => {
   const cfg = mysqlCfg();
+  const outDir = signedSchemaDir(cfg);
   process.env.SOURCE_DB_URL = "mysql://debezium:dbz@mysqlhost:3306/inventory";
 
   test("throws when the source binlog is still advancing (writes not stopped)", async () => {
@@ -297,7 +311,7 @@ describe("DebeziumEngine.cutover (mock source + fake target)", () => {
     });
     const { io, calls } = mockIO();
     await expect(
-      new DebeziumEngine(io, async () => my.conn).cutover(NODB, fakeTarget({}), cfg, {}),
+      new DebeziumEngine(io, async () => my.conn).cutover(NODB, fakeTarget({}), cfg, { outDir }),
     ).rejects.toThrow(/binlog still advancing/);
     // never stopped the container — gate failed closed
     expect(calls.exec.find((a) => a[1] === "stop")).toBeUndefined();
@@ -315,9 +329,24 @@ describe("DebeziumEngine.cutover (mock source + fake target)", () => {
       unsafe: (sql) => (sql.includes("count(*)") ? [{ n: "5" }] : []),
     });
     const { io, calls } = mockIO();
-    await new DebeziumEngine(io, async () => my.conn).cutover(NODB, target, cfg, {});
+    await new DebeziumEngine(io, async () => my.conn).cutover(NODB, target, cfg, { outDir });
     // stopped the container at the end (the drop-subscription analogue)
     expect(calls.exec).toContainEqual(debeziumStopArgv("pgshift-dbz-dbz"));
+  });
+
+  test("refuses to cutover when the schema draft is not signed off (the gate)", async () => {
+    const unsigned = mkdtempSync(join(tmpdir(), "pgshift-cutover-unsigned-"));
+    const m = buildManifest(cfg, { sql: "x", decisions: [] });
+    writeFileSync(schemaArtifactPaths(unsigned).manifest, `${JSON.stringify(m, null, 2)}\n`);
+    const my = fakeMySql(() => [{ File: "bin.000001", Position: 1 }]);
+    const { io, calls } = mockIO();
+    await expect(
+      new DebeziumEngine(io, async () => my.conn).cutover(NODB, fakeTarget({}), cfg, {
+        outDir: unsigned,
+      }),
+    ).rejects.toThrow(/NOT signed off/);
+    // gate failed BEFORE touching the source/container
+    expect(calls.exec.find((a) => a[1] === "stop")).toBeUndefined();
   });
 });
 

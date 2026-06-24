@@ -99,7 +99,9 @@ describe("MySQL source-prep playbook (§7)", () => {
     expect(st.phase).toBe("snapshot");
     expect(st.klass).toBe("guided");
     expect(st.severity).toBe("fail");
-    expect(st.guidance).toContain("Never auto-applies");
+    expect(st.guidance).toContain("never auto-applies");
+    expect(st.guidance).toContain("pgshift translate");
+    expect(st.guidance).toContain("--sign-off");
     expect(st.detect).toBeUndefined(); // a human-ratified draft, not a probe
   });
 

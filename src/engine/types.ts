@@ -15,6 +15,12 @@ export interface ReconcileOpts {
 export interface CutoverOpts {
   sequences?: string[];
   maxLagWaitSec?: number;
+  /**
+   * Directory holding the translated-schema sign-off manifest (heterogeneous sources only —
+   * the DebeziumEngine gates cutover on it via `assertSchemaSignedOff`). Mirrors the
+   * reconcile/verify out-dir; defaults to `ledger`. Ignored by the native-PG engine.
+   */
+  outDir?: string;
 }
 
 /**

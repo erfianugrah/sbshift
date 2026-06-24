@@ -139,8 +139,9 @@ const MYSQL: SourcePrepItem[] = [
       "  zero-dates     → NULL (Debezium zero-date fallback); confirm per column\n" +
       "  DATETIME/TIMESTAMP → timestamptz with the source session tz pinned\n" +
       "  DECIMAL        → numeric(p,s) preserved; warn on decimal.handling.mode rounding\n" +
-      "Never auto-applies: writes migration/<run>/target-schema.sql, records each decision, and " +
-      "gates cutover behind explicit sign-off.",
+      "Run `pgshift translate`: it never auto-applies — it writes <out-dir>/target-schema.sql + " +
+      "target-schema.decisions.json (out-dir defaults to ledger/), records each decision, and " +
+      "cutover refuses to run until you review + `pgshift translate --sign-off`.",
     provenance: {
       source: "https://debezium.io/documentation/reference/stable/connectors/mysql.html",
       lastSynced: "2026-06-24",

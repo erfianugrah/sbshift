@@ -122,6 +122,9 @@ async function runPhase(
       return;
     }
     case "cutover":
-      return engine.cutover(source, target, cfg, { maxLagWaitSec: opts.maxLagWaitSec ?? 300 });
+      return engine.cutover(source, target, cfg, {
+        maxLagWaitSec: opts.maxLagWaitSec ?? 300,
+        outDir: opts.outDir,
+      });
   }
 }

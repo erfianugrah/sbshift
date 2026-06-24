@@ -31,6 +31,7 @@ import { provision } from "./steps/provision.ts";
 import { PHASES, type Phase, run } from "./steps/run.ts";
 import { sandboxDown, sandboxStatus, sandboxUp } from "./steps/sandbox.ts";
 import { printStatus, status } from "./steps/status.ts";
+import { renderTranslate, signOffSchema, translate } from "./steps/translate.ts";
 import { type FailOn, verify } from "./steps/verify.ts";
 
 const { version } = JSON.parse(
@@ -239,11 +240,61 @@ program
   .command("cutover")
   .description("drain lag to zero then drop the subscription (stop app writes FIRST)")
   .option("--max-lag-wait <sec>", "seconds to wait for lag to drain", "300")
+  .option(
+    "--out-dir <path>",
+    "directory holding the translated-schema sign-off manifest (heterogeneous sources)",
+    "ledger",
+  )
   .action((o) =>
     withDb(({ source, target }, cfg) =>
-      engineFor(cfg).cutover(source, target, cfg, { maxLagWaitSec: Number(o.maxLagWait) }),
+      engineFor(cfg).cutover(source, target, cfg, {
+        maxLagWaitSec: Number(o.maxLagWait),
+        outDir: o.outDir,
+      }),
     ),
   );
+
+program
+  .command("translate")
+  .description(
+    "guided MySQL→Postgres schema translation: draft target DDL + surface the type decisions a " +
+      "human must ratify (never auto-applies; cutover gates on `--sign-off`)",
+  )
+  .option("--out-dir <path>", "directory for target-schema.sql + the decisions manifest", "ledger")
+  .option(
+    "--apply",
+    "also apply the drafted DDL to the TARGET (MUTATES it); default: write only",
+    false,
+  )
+  .option(
+    "--sign-off",
+    "ratify the existing draft (review + apply done) so cutover may proceed",
+    false,
+  )
+  .option("--json", "emit the draft + decisions manifest as JSON on stdout", false)
+  .action((o) => {
+    if (o.signOff) {
+      // Sign-off needs no DB — it only flips the on-disk manifest.
+      try {
+        const manifest = signOffSchema(o.outDir);
+        if (o.json) process.stdout.write(`${JSON.stringify(manifest, null, 2)}\n`);
+      } catch (e) {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      }
+      return;
+    }
+    if (o.json) log.toStderr();
+    return withDb(async ({ target }, cfg) => {
+      const result = await translate(cfg, loadSecrets(), {
+        outDir: o.outDir,
+        apply: Boolean(o.apply),
+        target,
+      });
+      if (o.json) process.stdout.write(`${JSON.stringify(result.manifest, null, 2)}\n`);
+      else renderTranslate(result);
+    });
+  });
 
 program
   .command("teardown")

@@ -15,11 +15,13 @@
  */
 
 import { execSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import postgres from "postgres";
 import { ConfigSchema } from "../../src/config.ts";
 import { DebeziumEngine } from "../../src/engine/debezium.ts";
-import { connectMySql } from "../../src/engine/mysql.ts";
-import { draftTargetSchema } from "../../src/engine/schema-translate.ts";
+import { signOffSchema, translate } from "../../src/steps/translate.ts";
 
 const COMPOSE = ["docker", "compose", "-f", "test/heterogeneous/docker-compose.yml"];
 const NET = "pgshift-dbz-it";
@@ -73,19 +75,28 @@ async function main() {
   // biome-ignore lint/suspicious/noExplicitAny: Db sentinels — debezium ignores source/target
   const NODB = null as any;
   const pg = postgres(TARGET_HOST_URL, { idle_timeout: 5 });
+  // Production schema-translation out-dir: translate() writes target-schema.sql + the decisions
+  // manifest here, and cutover's assertSchemaSignedOff() reads it back. A throwaway temp dir keeps
+  // the harness self-contained. cutover is passed { outDir } so the gate finds this manifest.
+  const outDir = mkdtempSync(join(tmpdir(), "pgshift-harness-schema-"));
   let failed = false;
   try {
-    console.log("── schema-translate: draft + apply the target schema from MySQL ──");
-    const my = await connectMySql("mysql://debezium:dbz@127.0.0.1:53306/inventory");
-    const draft = await draftTargetSchema(my, "inventory", ["customers"]);
-    await my.end();
+    console.log(
+      "── translate: draft + apply the target schema, then sign off (the production gate) ──",
+    );
+    // SOURCE_DB_URL (set above to the host-published MySQL port) is what translate() reads.
+    const { draft } = await translate(cfg, { SOURCE_DB_URL: process.env.SOURCE_DB_URL } as never, {
+      outDir,
+      apply: true,
+      target: pg,
+    });
     console.log(draft.sql);
     if (draft.decisions.length > 0) {
-      console.log("guided decisions (would gate cutover in production):");
+      console.log("guided decisions (gate cutover until signed off):");
       for (const d of draft.decisions) console.log(`  - ${d.table}.${d.column}: ${d.review}`);
     }
-    await pg.unsafe(draft.sql); // production writes this for human sign-off; the harness auto-applies
-    console.log("target schema applied");
+    signOffSchema(outDir); // operator's explicit ratification — cutover refuses without it
+    console.log("target schema applied + signed off");
 
     console.log("── replicate: launch Debezium + wait healthy ──");
     await new DebeziumEngine().replicate(NODB, NODB, cfg, secrets);
@@ -111,8 +122,8 @@ async function main() {
     console.log("── watch: connector health + caught-up (resolves immediately) ──");
     await new DebeziumEngine().watch(NODB, pg, cfg);
 
-    console.log("── cutover: write-stop gate + drain + stop CDC ──");
-    await new DebeziumEngine().cutover(NODB, pg, cfg, { maxLagWaitSec: 30 });
+    console.log("── cutover: schema sign-off gate + write-stop gate + drain + stop CDC ──");
+    await new DebeziumEngine().cutover(NODB, pg, cfg, { maxLagWaitSec: 30, outDir });
     // cutover stops the container — confirm it is gone from the running set
     const running = execSync("docker ps --format '{{.Names}}'", { encoding: "utf8" });
     assert(!/pgshift-dbz-dbz/.test(running), "cutover did not stop the Debezium container");

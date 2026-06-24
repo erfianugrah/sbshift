@@ -10,13 +10,12 @@ export type { CutoverOpts, EngineKind, ReconcileOpts, ReplicationEngine } from "
 /**
  * Pick the data-plane engine for a migration (HETEROGENEOUS.md §3).
  *
- * Dispatches on the source engine declared in config. `postgres` — the default, and today's
- * only working path — maps to native logical replication (`NativePgEngine`). The heterogeneous
- * engines (`mysql`, `sqlserver`) map to the `DebeziumEngine`: its config rendering is real and
- * tested, but its lifecycle methods fail loud (the container runtime is gated on the
- * delivery-vehicle decision — HETEROGENEOUS.md §5, spike finding #1). Returning the engine here
- * rather than throwing keeps the seam structurally complete and every caller engine-agnostic;
- * the loud failure surfaces at the first lifecycle call instead.
+ * Dispatches on the source engine declared in config. `postgres` (the default) maps to native
+ * logical replication (`NativePgEngine`). The heterogeneous engines (`mysql`, `sqlserver`) map to
+ * the `DebeziumEngine`. The full mysql lifecycle is implemented + harness-verified
+ * (test/heterogeneous/, PASS); `sqlserver` is the next engine (HETEROGENEOUS.md §6) and its
+ * lifecycle methods fail loud until it lands. Dispatching here (rather than at each call site)
+ * keeps every caller engine-agnostic.
  */
 export function engineFor(cfg: Config): ReplicationEngine {
   switch (cfg.source.engine) {

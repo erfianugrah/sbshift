@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Config, Secrets } from "../config.ts";
 import type { Db } from "../db.ts";
 import { log } from "../log.ts";
+import { assertSchemaSignedOff } from "../steps/translate.ts";
 import { debeziumPlanFromConfig, renderDebeziumServerConfig } from "./debezium-config.ts";
 import {
   debeziumContainerName,
@@ -112,17 +113,18 @@ export function resolveRuntimeOpts(
  * process (MySQL binlog → JDBC sink → Postgres, no Kafka). The delivery vehicle is pinned
  * (debezium-runtime.ts) and the config + run-spec + reconcile renderers are unit-tested.
  *
- * Implemented: `replicate` (stage config + run the container + wait for health) and `teardown`
- * (stop/rm the container + drop the offset volume) — Debezium connects to MySQL itself, so these
- * never touch the `source` Db (which `connect()` builds as a Postgres client, useless for a
- * MySQL source). Their orchestration is unit-tested via the injected {@link DebeziumIO}; the
- * end-to-end path is validated by the Docker harness (test/heterogeneous/).
+ * Full lifecycle implemented + harness-verified (test/heterogeneous/, PASS) against real Debezium
+ * 3.6.0.Beta2 + MySQL 8.2 + Postgres 16: `replicate` (stage config + run the container + wait for
+ * health), `watch` (connector health + row-count convergence), `reconcile` (count + portable
+ * aggregates, downgrade caveat logged loud), `cutover` (translated-schema sign-off gate + binlog
+ * write-stop gate + identity resync), `teardown` (stop/rm + drop the offset volume). Debezium
+ * connects to MySQL itself for `replicate`/`teardown`, so those never touch the `source` Db (which
+ * `connect()` builds as a Postgres client, useless for a MySQL source); the other three open their
+ * own `mysql2` connection from SOURCE_DB_URL. Orchestration is unit-tested via the injected
+ * {@link DebeziumIO} + MySQL seam; the end-to-end path is the Docker harness's job.
  *
- * Still gated (fail loud): `watch` (the Debezium Server metrics JSON shape must be confirmed
- * against a live server before parsing lag), and `reconcile` / `cutover` — both must query the
- * MySQL source DIRECTLY (aggregate scan; `SHOW MASTER STATUS` / GTID write-stop gate), which
- * needs a MySQL client dependency the project does not yet carry. That dependency choice is the
- * next decision.
+ * Heterogeneous source support is mysql-only today; `sqlserver` is the next engine
+ * (HETEROGENEOUS.md §6) and the non-mysql lifecycle methods fail loud until it lands.
  */
 export class DebeziumEngine implements ReplicationEngine {
   readonly kind = "debezium" as const;
@@ -337,11 +339,17 @@ export class DebeziumEngine implements ReplicationEngine {
    * identity/serial sequence to the source's MAX (Debezium upserts explicit PKs, so a stuck
    * sequence would collide on the next local insert); (3) stop the Debezium container (the
    * analogue of dropping the subscription). Caller MUST have already stopped application writes.
+   *
+   * Before any of that it enforces the translated-schema sign-off gate (GUIDED-MIGRATION.md §7):
+   * cutover refuses to flip traffic onto a schema the operator never reviewed + ratified via
+   * `pgshift translate --sign-off`.
    */
   async cutover(_source: Db, target: Db, cfg: Config, opts: CutoverOpts): Promise<void> {
     if (cfg.source.engine !== "mysql") {
       this.notImplemented("cutover", "only mysql sources are rendered yet (HETEROGENEOUS.md §6)");
     }
+    // Schema sign-off gate (the `guided` heart) — must pass before we touch the source/target.
+    assertSchemaSignedOff(opts.outDir ?? "ledger");
     const url = process.env.SOURCE_DB_URL;
     if (!url) throw new Error("cutover (debezium): SOURCE_DB_URL is required");
     log.step("cutover (debezium) — MySQL write-stop gate + identity resync");
