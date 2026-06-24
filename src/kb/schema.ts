@@ -100,3 +100,48 @@ export type CheckItem = z.infer<typeof CheckItem>;
 
 /** A validated list of check items. */
 export const Checks = z.array(CheckItem);
+
+/** Heterogeneous source engines with a `pgshift guide <engine>` prep playbook (HETEROGENEOUS.md
+ *  §5 source priority). PG-family sources use the native-pg ProviderHint catalog instead. */
+export const SourcePrepEngine = z.enum(["mysql", "sqlserver"]);
+export type SourcePrepEngine = z.infer<typeof SourcePrepEngine>;
+
+/**
+ * A source-prep knowledge item for a heterogeneous engine (MySQL / SQL Server), the
+ * `KnowledgeItem` of docs/GUIDED-MIGRATION.md §4 scoped to the source-prep → cutover playbook
+ * those engines need before a Debezium ReplicationEngine (HETEROGENEOUS.md) can stream them.
+ *
+ * Unlike `CheckItem` — whose Postgres `detect.sql` `doctor` runs live — these probes are
+ * MySQL SQL / T-SQL. pgshift has no driver for those engines until the DebeziumEngine runtime
+ * lands, so `detect`/`verify` are **documentation-grade today**: `pgshift guide <engine>`
+ * prints them; nothing executes them yet. They are carried now (not invented later) so the
+ * runtime inherits a ready, provenance-stamped probe set — the KB de-risks the engine.
+ *
+ * `klass` (auto/assisted/guided/informed) drives the future `guide` walk (§5): `auto` performs
+ * + verifies, `assisted`/`guided` draft-then-ratify, `informed` prints + acks. Today only the
+ * print path exists.
+ */
+export const SourcePrepItem = z.object({
+  /** Stable id, engine-prefixed, e.g. "mysql.binlog_enabled". */
+  id: z.string().min(1),
+  /** Heterogeneous source engine this item applies to (the `guide <engine>` key). */
+  engine: SourcePrepEngine,
+  phase: Phase,
+  /** fail gates the phase; warn/info are advisory. */
+  severity: z.enum(["fail", "warn", "info"]),
+  /** auto applies it; assisted/guided draft-then-ratify; informed prints + acks. */
+  klass: z.enum(["auto", "assisted", "guided", "informed"]),
+  /** Short human label, e.g. "MySQL binlog enabled". */
+  title: z.string().min(1),
+  /** Verbatim remediation — exact SQL / my.cnf / console steps. Tests assert substrings. */
+  guidance: z.string().min(1),
+  /** Source-side probe (MySQL SQL / T-SQL) revealing current state. Documentation-grade today. */
+  detect: z.object({ sql: z.string().min(1) }).optional(),
+  /** Source-side verify probe + the human-readable expected result. Documentation-grade today. */
+  verify: z.object({ sql: z.string().min(1), expect: z.string().min(1) }).optional(),
+  provenance: Provenance,
+});
+export type SourcePrepItem = z.infer<typeof SourcePrepItem>;
+
+/** A validated list of source-prep items. */
+export const SourcePrepItems = z.array(SourcePrepItem);
