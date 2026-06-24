@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { check, checks, type QueryFn, runCheck } from "../src/kb/checks.ts";
+import { check, checks, type QueryFn, runCheck, runProbe } from "../src/kb/checks.ts";
 import { Checks } from "../src/kb/schema.ts";
 
 const walLevel = check("source.wal_level_logical");
@@ -118,5 +118,41 @@ describe("runCheck — existence checks (no expect/column)", () => {
       expect(c.expect).toBeUndefined();
       expect(c.detect.sql).toContain("$1");
     }
+  });
+});
+
+describe("runProbe — multi-column predicate checks", () => {
+  const replicaIdentity = check("source.replica_identity");
+
+  test("returns the first row for the caller to evaluate", async () => {
+    const r = await runProbe<{ relreplident: string; has_pk: boolean }>(
+      rows({ relreplident: "d", has_pk: true }),
+      replicaIdentity,
+      ["public", "pastes"],
+    );
+    expect(r).toEqual({ relreplident: "d", has_pk: true });
+  });
+
+  test("no row → null (the table-not-found signal)", async () => {
+    const r = await runProbe(rows(), replicaIdentity, ["public", "missing"]);
+    expect(r).toBeNull();
+  });
+
+  test("forwards schema + table params in order", async () => {
+    let seen: readonly unknown[] | undefined;
+    const spy: QueryFn = async (_sql, p) => {
+      seen = p;
+      return [];
+    };
+    await runProbe(spy, replicaIdentity, ["public", "slugs"]);
+    expect(seen).toEqual(["public", "slugs"]);
+  });
+
+  test("the catalog item is a parametric, fail-severity probe with no column/expect", () => {
+    expect(replicaIdentity).toMatchObject({ phase: "source-prep", severity: "fail" });
+    expect(replicaIdentity.detect.sql).toContain("$1");
+    expect(replicaIdentity.detect.sql).toContain("$2");
+    expect(replicaIdentity.detect.column).toBeUndefined();
+    expect(replicaIdentity.expect).toBeUndefined();
   });
 });

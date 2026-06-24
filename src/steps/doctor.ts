@@ -1,6 +1,6 @@
 import type { Config, Secrets } from "../config.ts";
 import { classifyConn, connect, type Db, type PgProvider } from "../db.ts";
-import { check, runCheck } from "../kb/checks.ts";
+import { check, runCheck, runProbe } from "../kb/checks.ts";
 import { lookupProviderHint } from "../kb/provider-hints.ts";
 import { log } from "../log.ts";
 import { extensionStatements, missingExtensions } from "./bootstrap.ts";
@@ -258,13 +258,13 @@ async function sourceChecks(source: Db, cfg: Config, s: Sink): Promise<void> {
     : s.fail(`source wal_level=${wal.observed} (need 'logical')`);
 
   // replica identity per published table
+  const replicaIdentity = check("source.replica_identity");
   for (const qt of cfg.replication.tables) {
     const [schema, table] = qt.split(".");
-    const [row] = await source`
-      SELECT c.relreplident,
-             EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary) AS has_pk
-      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = ${schema ?? ""} AND c.relname = ${table ?? ""}`;
+    const row = await runProbe<{ relreplident: string; has_pk: boolean }>(q, replicaIdentity, [
+      schema ?? "",
+      table ?? "",
+    ]);
     if (!row) {
       s.fail(`published table ${qt} not found on source`);
       continue;

@@ -40,6 +40,29 @@ const RAW: CheckItem[] = [
     },
   },
   {
+    id: "source.replica_identity",
+    phase: "source-prep",
+    severity: "fail",
+    title: "replica identity",
+    // per-table probe: $1 schema, $2 table. Multi-column result (relreplident + has_pk) is
+    // evaluated by the caller, so no single `column`/`expect` here.
+    detect: {
+      sql:
+        "SELECT c.relreplident, " +
+        "EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary) AS has_pk " +
+        "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+        "WHERE n.nspname = $1 AND c.relname = $2",
+    },
+    guidance:
+      "A table that publishes UPDATE/DELETE must have a REPLICA IDENTITY (a primary key, a " +
+      "unique index via REPLICA IDENTITY USING INDEX, or REPLICA IDENTITY FULL) — otherwise " +
+      "those operations are disallowed and won't replicate.",
+    provenance: {
+      source: "/docs/postgres/sql-createpublication.md",
+      lastSynced: "2026-06-24",
+    },
+  },
+  {
     id: "source.wal_level_logical",
     phase: "source-prep",
     severity: "fail",
@@ -101,4 +124,19 @@ export async function runCheck(
   const observed = raw == null ? null : String(raw);
   const ok = item.expect != null ? observed === item.expect : present;
   return { id: item.id, present, observed, ok };
+}
+
+/**
+ * Run a check's probe and return the first row (or null), for checks whose pass/fail predicate
+ * spans multiple columns and so can't be expressed as `column`/`expect` — the caller evaluates
+ * the row itself. The knowledge that still lives in the KB is the probe SQL + provenance; only
+ * the row-shaped predicate stays in code.
+ */
+export async function runProbe<T = Record<string, unknown>>(
+  query: QueryFn,
+  item: CheckItem,
+  params?: readonly unknown[],
+): Promise<T | null> {
+  const rows = await query(item.detect.sql, params);
+  return (rows[0] as T | undefined) ?? null;
 }
