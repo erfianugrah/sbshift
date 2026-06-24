@@ -27,7 +27,15 @@ The harness self-contains the whole sequence (exit 0 = PASS):
    run`s the Debezium container onto `pgshift-dbz-it`, and waits for `/q/health`;
 4. **snapshot assert** — the 4 seeded rows land in `public.customers`;
 5. **CDC assert** — a row INSERTed in MySQL streams through the binlog and appears in Postgres;
-6. **teardown** — `engine.teardown()` stops/removes the container + offset volume; compose `down -v`.
+6. **reconcile** — `engine.reconcile()` (count + portable aggregates via `mysql2`) reports PASS;
+7. **watch** — `engine.watch()` confirms connector health + caught-up, resolves;
+8. **cutover** — `engine.cutover()` runs the binlog write-stop gate + drain + sequence resync and
+   stops the container;
+9. **teardown** — `engine.teardown()` removes the container + offset volume; compose `down -v`.
+
+reconcile/watch/cutover run in the host process and query MySQL directly, so the harness points
+`SOURCE_DB_URL` at the published `127.0.0.1:53306` for them (replicate's rendered config keeps the
+in-network `mysql:3306`).
 
 ## Topology
 
@@ -54,8 +62,8 @@ harness addresses them by published host ports for its own inserts + assertions.
 | `PGSHIFT_DBZ_IMAGE` | (default) | engine image tag (default the pinned `DEBEZIUM_IMAGE`) |
 | `PGSHIFT_DBZ_STAGE_DIR` | (default tmp) | where the rendered `application.properties` is staged |
 
-## Not yet covered (still-gated engine methods)
+## Status
 
-`watch`, `reconcile`, and `cutover` are not exercised — they are gated pending the Debezium
-metrics-shape confirmation (`watch`) and a MySQL-client dependency decision (`reconcile`/`cutover`
-must query the source directly). See [`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5.
+The full lifecycle (replicate / reconcile / watch / cutover / teardown) is exercised and passes
+against real Debezium 3.6.0.Beta2 + MySQL 8.2 + Postgres 16. See
+[`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5.

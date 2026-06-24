@@ -41,6 +41,9 @@ const secrets = { SOURCE_DB_URL, TARGET_DB_URL } as any;
 
 process.env.PGSHIFT_DBZ_NETWORK = NET;
 process.env.PGSHIFT_DBZ_METRICS_PORT = "18080"; // published 8080 → host:18080 for the health probe
+// reconcile/watch/cutover run in THIS (host) process and read SOURCE_DB_URL to query MySQL
+// directly — they need the published host port, not the in-network name the rendered config uses.
+process.env.SOURCE_DB_URL = "mysql://debezium:dbz@127.0.0.1:53306/inventory";
 
 const sh = (cmd: string[]) => execSync(cmd.join(" "), { stdio: "inherit" });
 const mysql = (sql: string) =>
@@ -86,6 +89,19 @@ async function main() {
     const [row] =
       await pg`SELECT first_name,last_name FROM customers WHERE email='ada@pgshift.dev'`;
     assert(row?.first_name === "Ada" && row?.last_name === "Lovelace", "CDC row content mismatch");
+
+    console.log("── reconcile: count + portable aggregates (expect PASS) ──");
+    const ok = await new DebeziumEngine().reconcile(NODB, pg, cfg);
+    assert(ok, "reconcile reported a mismatch");
+
+    console.log("── watch: connector health + caught-up (resolves immediately) ──");
+    await new DebeziumEngine().watch(NODB, pg, cfg);
+
+    console.log("── cutover: write-stop gate + drain + stop CDC ──");
+    await new DebeziumEngine().cutover(NODB, pg, cfg, { maxLagWaitSec: 30 });
+    // cutover stops the container — confirm it is gone from the running set
+    const running = execSync("docker ps --format '{{.Names}}'", { encoding: "utf8" });
+    assert(!/pgshift-dbz-dbz/.test(running), "cutover did not stop the Debezium container");
 
     console.log("\nHARNESS PASS ✓");
   } catch (e) {

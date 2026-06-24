@@ -145,9 +145,25 @@ trusts the sink's delivery guarantees, GA or not. The pin lives as a typed const
 `DEBEZIUM_RUNTIME_GA=false`); re-pin upward only when a matching image+jar pair ships (ideally
 `3.6.0.Final`) and flip the GA flag.
 
-With the vehicle decided, the remaining runtime work is the container lifecycle (start/watch/
-teardown), lag/offset monitoring for `watch`, and the cutover write-stop gate — not a research
-question.
+### Runtime — IMPLEMENTED + harness-verified (2026-06-24)
+
+The full `DebeziumEngine` lifecycle is built and proven end-to-end against real Debezium
+3.6.0.Beta2 + MySQL 8.2 + Postgres 16 by the Docker harness (`test/heterogeneous/`, PASS):
+
+- **`replicate`** — render config → stage 0600 → `docker run` the pinned image → poll `/q/health`.
+- **`reconcile`** — count + portable per-column aggregates on the MySQL source + PG target via the
+  `mysql2` client, diffed by `reconcile-aggregate.ts`; the byte-exact-hash downgrade is logged loudly.
+- **`watch`** — connector liveness via `/q/health` (the `debezium` check) + source/target row-count
+  convergence. NB: this image ships **no** `/q/metrics` endpoint (404), so there is no HTTP lag
+  number — health + count-convergence are the observable initial-sync-complete signals.
+- **`cutover`** — MySQL write-stop gate (`SHOW MASTER STATUS` position stability) → row-count drain
+  → identity/sequence resync (no-op for explicit-PK schemas) → stop the container (the
+  drop-subscription analogue).
+- **`teardown`** — stop + `rm -f` the container + drop the offset volume, idempotent.
+
+Orchestration logic is unit-tested behind an injected IO + MySQL seam (`test/debezium-runtime-io.test.ts`);
+the real Docker + Debezium behaviour is the harness's job. `mysql2` is the source-side client (the
+resolved dependency decision; `connect()` builds Postgres clients only).
 
 Source priority by demand: MySQL / Aurora-MySQL first, then SQL Server / Azure SQL (Debezium
 SQL Server connector), then MongoDB (document→relational, a separate sub-project), Oracle

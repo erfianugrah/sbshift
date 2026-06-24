@@ -24,4 +24,6 @@ FROM quay.io/debezium/server:3.6.0.Beta2
 USER root
 # Only the jars the stock image lacks land here; same-named same-version jars overwrite harmlessly.
 COPY --from=deps /jars/ /debezium/lib/
-USER debezium
+# NB: stay as the base image's default user — the stock image runs as a numeric UID with no
+# `debezium` passwd entry, so an explicit `USER debezium` makes `docker run` fail with
+# "unable to find user debezium". The spike proved running as-is works.
