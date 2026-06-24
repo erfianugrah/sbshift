@@ -243,8 +243,16 @@ CDC-out-of-MySQL, which is exactly what a MySQL→PG guide must encode.
   - `ENUM` / `SET` → `text` + optional `CHECK` ; flag for review.
   - zero-dates (`0000-00-00`) → `NULL` (the Debezium zero-date fallback) — confirm per
     column.
-  - `DATETIME` vs `TIMESTAMP` → `timestamptz` with the source session tz pinned.
+  - `DATETIME` vs `TIMESTAMP` → `timestamptz` with the source session tz pinned;
+    **fractional-second precision carries across** (`DATETIME(6)`→`timestamptz(6)`, `TIME(3)`→`time(3)`;
+    both engines cap at 6).
   - `DECIMAL` → `numeric(p,s)` preserved; warn on `decimal.handling.mode` rounding.
+  - **generated columns** (`STORED`/`VIRTUAL GENERATED`) → drafted as a **plain column** so the
+    CDC sink can write the captured value, then flagged with the source expression; converting to a
+    Postgres `GENERATED ALWAYS AS (...) STORED` is a by-hand decision (MySQL functions ≠ Postgres).
+  - `SET` → `text` (Debezium delivers it comma-joined) — or model as `text[]` / add a `CHECK`.
+  - **spatial** (`GEOMETRY`/`POINT`/`POLYGON`/`MULTI*`/`GEOMETRYCOLLECTION`) → `text` (WKB); use the
+    PostGIS `geometry` type if the target has the extension.
 - **act**: never auto-applies. Writes the draft to `migration/<run>/target-schema.sql`,
   records each human decision, and **gates cutover** behind explicit sign-off.
 - **provenance**: `https://debezium.io/documentation/reference/stable/connectors/mysql.html` → "Data type mappings"

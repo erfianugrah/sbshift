@@ -131,10 +131,156 @@ describe("translateColumn — type matrix", () => {
 
   test("unknown type falls back to text and is flagged REVIEW", () => {
     const t = translateColumn(
-      col({ COLUMN_NAME: "x", DATA_TYPE: "geomcollection", COLUMN_TYPE: "geomcollection" }),
+      col({ COLUMN_NAME: "x", DATA_TYPE: "newfangledtype", COLUMN_TYPE: "newfangledtype" }),
     );
     expect(t.pgType).toBe("text");
     expect(t.review).toMatch(/REVIEW/);
+  });
+
+  describe("fractional-second precision (HETEROGENEOUS \u00a73)", () => {
+    test("DATETIME(6) carries precision into timestamptz(6)", () => {
+      const t = translateColumn(
+        col({
+          COLUMN_NAME: "ca",
+          DATA_TYPE: "datetime",
+          COLUMN_TYPE: "datetime(6)",
+          DATETIME_PRECISION: 6,
+        }),
+      );
+      expect(t.pgType).toBe("timestamptz(6)");
+      expect(t.review).toMatch(/tz/i);
+    });
+
+    test("TIMESTAMP(3) → timestamptz(3); TIME(6) → time(6)", () => {
+      expect(
+        translateColumn(
+          col({
+            COLUMN_NAME: "ts",
+            DATA_TYPE: "timestamp",
+            COLUMN_TYPE: "timestamp(3)",
+            DATETIME_PRECISION: 3,
+          }),
+        ).pgType,
+      ).toBe("timestamptz(3)");
+      expect(
+        translateColumn(
+          col({
+            COLUMN_NAME: "t",
+            DATA_TYPE: "time",
+            COLUMN_TYPE: "time(6)",
+            DATETIME_PRECISION: 6,
+          }),
+        ).pgType,
+      ).toBe("time(6)");
+    });
+
+    test("precision 0 emits the bare type (no (0))", () => {
+      expect(
+        translateColumn(
+          col({ COLUMN_NAME: "ts", DATA_TYPE: "timestamp", COLUMN_TYPE: "timestamp" }),
+        ).pgType,
+      ).toBe("timestamptz");
+      expect(
+        translateColumn(col({ COLUMN_NAME: "t", DATA_TYPE: "time", COLUMN_TYPE: "time" })).pgType,
+      ).toBe("time");
+    });
+
+    test("precision parsed from COLUMN_TYPE when DATETIME_PRECISION absent", () => {
+      expect(
+        translateColumn(
+          col({ COLUMN_NAME: "ca", DATA_TYPE: "datetime", COLUMN_TYPE: "datetime(6)" }),
+        ).pgType,
+      ).toBe("timestamptz(6)");
+    });
+  });
+
+  describe("generated columns (HETEROGENEOUS \u00a73)", () => {
+    test("STORED generated → base type, flagged with the expression", () => {
+      const t = translateColumn(
+        col({
+          COLUMN_NAME: "full_name",
+          DATA_TYPE: "varchar",
+          COLUMN_TYPE: "varchar(511)",
+          CHARACTER_MAXIMUM_LENGTH: 511,
+          EXTRA: "STORED GENERATED",
+          GENERATION_EXPRESSION: "concat(first_name,' ',last_name)",
+        }),
+      );
+      expect(t.pgType).toBe("varchar(511)");
+      expect(t.review).toMatch(/STORED GENERATED/);
+      expect(t.review).toMatch(/concat\(first_name/);
+    });
+
+    test("VIRTUAL generated → base type, flagged VIRTUAL", () => {
+      const t = translateColumn(
+        col({
+          COLUMN_NAME: "area",
+          DATA_TYPE: "int",
+          COLUMN_TYPE: "int",
+          EXTRA: "VIRTUAL GENERATED",
+          GENERATION_EXPRESSION: "(w * h)",
+        }),
+      );
+      expect(t.pgType).toBe("integer");
+      expect(t.review).toMatch(/VIRTUAL GENERATED/);
+    });
+
+    test("generated overlay preserves an existing type review note", () => {
+      const t = translateColumn(
+        col({
+          COLUMN_NAME: "flag_count",
+          DATA_TYPE: "int",
+          COLUMN_TYPE: "int unsigned",
+          EXTRA: "STORED GENERATED",
+          GENERATION_EXPRESSION: "(x + 1)",
+        }),
+      );
+      expect(t.pgType).toBe("bigint"); // unsigned widening still applies
+      expect(t.review).toMatch(/widened/);
+      expect(t.review).toMatch(/STORED GENERATED/);
+    });
+
+    test("auto_increment is NOT treated as a generated column", () => {
+      const t = translateColumn(
+        col({
+          COLUMN_NAME: "id",
+          DATA_TYPE: "int",
+          COLUMN_TYPE: "int",
+          EXTRA: "auto_increment",
+        }),
+      );
+      expect(t.review).toBeUndefined();
+    });
+  });
+
+  describe("SET and spatial (HETEROGENEOUS \u00a73)", () => {
+    test("SET note mentions comma-joined delivery and the text[]/CHECK option", () => {
+      const t = translateColumn(
+        col({ COLUMN_NAME: "tags", DATA_TYPE: "set", COLUMN_TYPE: "set('a','b','c')" }),
+      );
+      expect(t.pgType).toBe("text");
+      expect(t.review).toMatch(/SET/);
+      expect(t.review).toMatch(/comma-joined/);
+      expect(t.review).toMatch(/text\[\]/);
+    });
+
+    test("all spatial types map to text with a PostGIS review", () => {
+      for (const dt of [
+        "geometry",
+        "point",
+        "linestring",
+        "polygon",
+        "multipoint",
+        "multilinestring",
+        "multipolygon",
+        "geometrycollection",
+        "geomcollection",
+      ]) {
+        const t = translateColumn(col({ COLUMN_NAME: "g", DATA_TYPE: dt, COLUMN_TYPE: dt }));
+        expect(t.pgType).toBe("text");
+        expect(t.review).toMatch(/PostGIS/);
+      }
+    });
   });
 
   test("NOT NULL is carried from IS_NULLABLE", () => {

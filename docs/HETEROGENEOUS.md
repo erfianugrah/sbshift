@@ -35,7 +35,7 @@ you wrap an engine that already did. The eight pieces:
 |---|---|---|---|
 | 1 | Source CDC capture | MySQL/Aurora-MySQL binlog (ROW); PlanetScale Vitess **VStream**; SQL Server / Azure SQL CDC change-tables; Oracle LogMiner/XStream | **wrap (Debezium)** |
 | 2 | Normalized change envelope | op + before/after row image + source position (GTID/LSN) | **wrap (Debezium)** |
-| 3 | Type mapping matrix | `TINYINT(1)`→bool, unsigned ints, ENUM/SET, zero-dates; SQL Server `UNIQUEIDENTIFIER`→uuid, BIT, MONEY, DATETIME2, collations | **wrap (Debezium) + `guided` review** |
+| 3 | Type mapping matrix | `TINYINT(1)`→bool, unsigned ints, ENUM/SET, zero-dates, fractional-second precision, generated columns, spatial; SQL Server `UNIQUEIDENTIFIER`→uuid, BIT, MONEY, DATETIME2, collations | **wrap (Debezium) + `guided` review** — MySQL matrix DONE (`schema-translate.ts`); SQL Server pending |
 | 4 | Schema/DDL translation | source DDL → Postgres DDL | **own — the long pole; see GUIDED-MIGRATION §7** |
 | 5 | Consistent snapshot + position | MySQL consistent-snapshot txn + GTID; SQL Server snapshot isolation + LSN; then `COPY` | **wrap (Debezium snapshot)** |
 | 6 | Apply loop into Postgres | ordering, idempotency, batching | **wrap (Debezium JDBC/PG sink)** |
@@ -171,6 +171,13 @@ Two CLI surfaces complete the guided path (MVP §5 item 3, DELIVERED 2026-06-24)
   `binlog_row_value_options`) are judged pass/warn/fail against the real server; retention is a
   live reading to weigh by hand; the schema gate points at `translate`. Target checks drop to
   reachability + version + translated-tables-exist (no CREATE SUBSCRIPTION — Debezium is the sink).
+
+The MySQL type matrix (item 3) is **complete** (`src/engine/schema-translate.ts`,
+`test/schema-translate.test.ts`): the common matrix plus the edges — fractional-second precision
+(`DATETIME(6)`→`timestamptz(6)`), generated columns (drafted as plain columns so the sink can write
+captured values, then flagged with the source expression), SET (comma-joined `text`, or `text[]`/CHECK),
+and the full spatial family (WKB `text`, or PostGIS). Anything unsettleable is drafted to a safe
+default and flagged for review, never silently guessed.
 
 Orchestration logic is unit-tested behind an injected IO + MySQL seam (`test/debezium-runtime-io.test.ts`);
 the real Docker + Debezium behaviour is the harness's job. `mysql2` is the source-side client (the

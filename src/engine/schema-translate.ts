@@ -9,9 +9,11 @@
  * (`draftTargetSchema`) just feeds `information_schema` rows in. Type mappings follow Debezium's
  * documented MySQL "Data type mappings".
  *
- * This is a FIRST CUT covering the common matrix + everything in the demo schema. Less-common
- * types (SET multi-value semantics, spatial, fractional-second precision, generated columns) are
- * drafted to a safe default and flagged for review rather than silently guessed.
+ * Covers the common matrix + the less-common edges (HETEROGENEOUS.md §3): fractional-second
+ * precision (DATETIME(6)→timestamptz(6)), generated columns (drafted as plain columns so the CDC
+ * sink can write captured values, then flagged), SET multi-value semantics, and the full spatial
+ * family. Edges that cannot be settled automatically are drafted to a safe default and flagged for
+ * review rather than silently guessed.
  */
 
 /** A row of MySQL `information_schema.columns` (the subset we read). */
@@ -25,6 +27,10 @@ export interface MySqlColumn {
   CHARACTER_MAXIMUM_LENGTH: number | string | null;
   NUMERIC_PRECISION: number | string | null;
   NUMERIC_SCALE: number | string | null;
+  /** Fractional-second precision for DATETIME/TIMESTAMP/TIME (0 when none). */
+  DATETIME_PRECISION?: number | string | null;
+  /** The generation expression for a GENERATED column (`EXTRA` carries STORED/VIRTUAL GENERATED). */
+  GENERATION_EXPRESSION?: string | null;
 }
 
 export interface TranslatedColumn {
@@ -40,8 +46,42 @@ const num = (v: number | string | null | undefined, fallback: number): number =>
   return Number.isFinite(n) ? n : fallback;
 };
 
-/** Translate one MySQL column to its Postgres type, flagging decisions a human must ratify. */
+/**
+ * Fractional-second precision for a temporal column: prefer `DATETIME_PRECISION`, else parse it
+ * from `COLUMN_TYPE` (e.g. `datetime(6)`), else 0. MySQL and Postgres both cap at 6 (microseconds),
+ * so the value carries straight across.
+ */
+const fsp = (col: MySqlColumn): number => {
+  const dp = Number(col.DATETIME_PRECISION);
+  if (Number.isFinite(dp) && dp > 0) return dp;
+  const m = col.COLUMN_TYPE.match(/\((\d+)\)/);
+  return m ? Number(m[1]) : 0;
+};
+
+/** Append a `(p)` precision qualifier when p > 0. */
+const withP = (base: string, p: number): string => (p > 0 ? `${base}(${p})` : base);
+
+/**
+ * Translate one MySQL column to its Postgres type, flagging decisions a human must ratify. Applies
+ * the generated-column overlay last so a base-type review note (e.g. unsigned widening) survives.
+ */
 export function translateColumn(col: MySqlColumn): TranslatedColumn {
+  const base = mapType(col);
+  const extra = (col.EXTRA || "").toUpperCase();
+  if (extra.includes("GENERATED")) {
+    const kind = extra.includes("VIRTUAL") ? "VIRTUAL" : "STORED";
+    const expr = (col.GENERATION_EXPRESSION || "").trim();
+    const note =
+      `${kind} GENERATED column${expr ? ` (= ${expr})` : ""}: drafted as a plain column so the ` +
+      "CDC sink can write captured values; convert to a Postgres `GENERATED ALWAYS AS (...) STORED` " +
+      "only after translating the expression by hand (MySQL functions ≠ Postgres)";
+    return { ...base, review: base.review ? `${base.review}; ${note}` : note };
+  }
+  return base;
+}
+
+/** The raw type → Postgres type matrix, before the generated-column overlay. */
+function mapType(col: MySqlColumn): TranslatedColumn {
   const dt = col.DATA_TYPE.toLowerCase();
   const ct = col.COLUMN_TYPE.toLowerCase();
   const unsigned = ct.includes("unsigned");
@@ -100,24 +140,40 @@ export function translateColumn(col: MySqlColumn): TranslatedColumn {
     case "date":
       return out("date");
     case "datetime":
-      return out("timestamptz", "DATETIME→timestamptz; pin the source session tz so values align");
+      return out(
+        withP("timestamptz", fsp(col)),
+        "DATETIME→timestamptz; pin the source session tz so values align",
+      );
     case "timestamp":
-      return out("timestamptz");
+      return out(withP("timestamptz", fsp(col)));
     case "time":
-      return out("time");
+      return out(withP("time", fsp(col)));
     case "year":
       return out("smallint", "YEAR→smallint");
     case "enum":
       return out("text", `ENUM (${ct})→text; add a CHECK constraint or native enum if desired`);
     case "set":
-      return out("text", `SET (${ct})→text; SET is a comma-joined multi-value — review semantics`);
+      return out(
+        "text",
+        `SET (${ct})→text; Debezium delivers SET as a comma-joined string — keep text, or model ` +
+          "as text[] / add a CHECK to enforce the allowed members",
+      );
     case "json":
       return out("jsonb");
     case "geometry":
     case "point":
     case "linestring":
     case "polygon":
-      return out("text", `spatial type '${dt}'→text; consider PostGIS geometry`);
+    case "multipoint":
+    case "multilinestring":
+    case "multipolygon":
+    case "geometrycollection":
+    case "geomcollection":
+      return out(
+        "text",
+        `spatial type '${dt}'→text (Debezium delivers WKB); use the PostGIS geometry type if ` +
+          "the target has the extension",
+      );
     default:
       return out("text", `unmapped MySQL type '${dt}' (${ct})→text — REVIEW`);
   }
@@ -171,7 +227,8 @@ export async function draftTargetSchema(
   for (const table of tables) {
     const cols = await my.query<MySqlColumn>(
       `SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, EXTRA,
-              CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
+              CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE,
+              DATETIME_PRECISION, GENERATION_EXPRESSION
        FROM information_schema.COLUMNS
        WHERE TABLE_SCHEMA = '${db}' AND TABLE_NAME = '${table}'
        ORDER BY ORDINAL_POSITION`,
