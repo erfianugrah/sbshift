@@ -186,13 +186,16 @@ export interface TableDraft {
   decisions: { table: string; column: string; review: string }[];
 }
 
-/** Render the Postgres CREATE TABLE draft for one table from its translated columns + PK list. */
-export function renderCreateTable(
+/**
+ * Render the Postgres CREATE TABLE draft from already-translated columns + a PK list. Engine-
+ * agnostic (the MySQL and SQL Server translators both feed their {@link TranslatedColumn}s here),
+ * so the DDL shape + decision-collection live in one place.
+ */
+export function renderCreateTableFromColumns(
   table: string,
-  columns: MySqlColumn[],
+  translated: TranslatedColumn[],
   primaryKey: string[],
 ): TableDraft {
-  const translated = columns.map(translateColumn);
   const lines = translated.map((c) => `  "${c.name}" ${c.pgType}${c.nullable ? "" : " NOT NULL"}`);
   if (primaryKey.length > 0) {
     lines.push(`  PRIMARY KEY (${primaryKey.map((c) => `"${c}"`).join(", ")})`);
@@ -202,6 +205,15 @@ export function renderCreateTable(
     .filter((c) => c.review)
     .map((c) => ({ table, column: c.name, review: c.review as string }));
   return { sql, decisions };
+}
+
+/** Render the Postgres CREATE TABLE draft for one table from its MySQL columns + PK list. */
+export function renderCreateTable(
+  table: string,
+  columns: MySqlColumn[],
+  primaryKey: string[],
+): TableDraft {
+  return renderCreateTableFromColumns(table, columns.map(translateColumn), primaryKey);
 }
 
 import type { MySqlConn } from "./mysql.ts";
