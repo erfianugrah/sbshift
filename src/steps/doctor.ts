@@ -251,7 +251,8 @@ function reachHint(error: string | undefined, c: ReturnType<typeof classifyConn>
 async function sourceChecks(source: Db, cfg: Config, s: Sink): Promise<void> {
   log.step("doctor: source readiness");
 
-  const wal = await runCheck((sql) => source.unsafe(sql), check("source.wal_level_logical"));
+  const q = (sql: string, p?: readonly unknown[]) => source.unsafe(sql, (p ?? []) as never[]);
+  const wal = await runCheck(q, check("source.wal_level_logical"));
   wal.ok
     ? s.ok("source wal_level=logical")
     : s.fail(`source wal_level=${wal.observed} (need 'logical')`);
@@ -339,14 +340,12 @@ async function sourceChecks(source: Db, cfg: Config, s: Sink): Promise<void> {
   }
 
   // stale leftovers from a prior run
-  const [slot] =
-    await source`SELECT 1 FROM pg_replication_slots WHERE slot_name = ${cfg.replication.slot}`;
-  slot
+  const slot = await runCheck(q, check("source.slot_absent"), [cfg.replication.slot]);
+  slot.present
     ? s.warn(`slot ${cfg.replication.slot} already exists on source — teardown a prior run first`)
     : s.ok(`no stale slot (${cfg.replication.slot})`);
-  const [pub] =
-    await source`SELECT 1 FROM pg_publication WHERE pubname = ${cfg.replication.publication}`;
-  if (pub) s.warn(`publication ${cfg.replication.publication} already exists on source`);
+  const pub = await runCheck(q, check("source.publication_absent"), [cfg.replication.publication]);
+  if (pub.present) s.warn(`publication ${cfg.replication.publication} already exists on source`);
 
   // row counts (informational — drives copy-time + WAL expectations)
   for (const qt of cfg.replication.tables) {

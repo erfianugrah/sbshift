@@ -80,13 +80,15 @@ export const CheckItem = z.object({
   severity: z.enum(["fail", "warn", "info"]),
   /** Short human label, e.g. "source wal_level". */
   title: z.string().min(1),
-  /** A probe returning a single row; `column` names the observed value within it. */
+  /** A SQL probe. `column` names the observed value (value checks); omit it for existence
+   *  checks, where the caller reads `present` (did the probe return a row?). `$1`-style
+   *  placeholders are bound to params supplied at run time (e.g. a config slot/publication name). */
   detect: z.object({
     sql: z.string().min(1),
-    column: z.string().min(1),
+    column: z.string().min(1).optional(),
   }),
-  /** The string `detect.column` must equal for the check to pass. */
-  expect: z.string(),
+  /** The string `detect.column` must equal to pass (value checks). Omit for existence checks. */
+  expect: z.string().optional(),
   /** Verbose remediation (the `guide` surface; doctor keeps its own terse line). */
   guidance: z.string().min(1),
   provenance: Provenance,

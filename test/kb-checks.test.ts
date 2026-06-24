@@ -45,12 +45,22 @@ describe("checks catalog", () => {
 describe("runCheck", () => {
   test("observed equals expect → ok", async () => {
     const r = await runCheck(rows({ wal_level: "logical" }), walLevel);
-    expect(r).toEqual({ id: "source.wal_level_logical", observed: "logical", ok: true });
+    expect(r).toEqual({
+      id: "source.wal_level_logical",
+      present: true,
+      observed: "logical",
+      ok: true,
+    });
   });
 
   test("observed differs → not ok, observed carried through for the message", async () => {
     const r = await runCheck(rows({ wal_level: "replica" }), walLevel);
-    expect(r).toEqual({ id: "source.wal_level_logical", observed: "replica", ok: false });
+    expect(r).toEqual({
+      id: "source.wal_level_logical",
+      present: true,
+      observed: "replica",
+      ok: false,
+    });
   });
 
   test("non-string observed is stringified before comparison", async () => {
@@ -64,11 +74,49 @@ describe("runCheck", () => {
 
   test("empty result set → observed null, not ok", async () => {
     const r = await runCheck(rows(), walLevel);
-    expect(r).toEqual({ id: "source.wal_level_logical", observed: null, ok: false });
+    expect(r).toEqual({
+      id: "source.wal_level_logical",
+      present: false,
+      observed: null,
+      ok: false,
+    });
   });
 
   test("reads the named column, ignoring others in the row", async () => {
     const r = await runCheck(rows({ other: "x", wal_level: "logical" }), walLevel);
     expect(r.ok).toBe(true);
+  });
+});
+
+describe("runCheck — existence checks (no expect/column)", () => {
+  const slot = check("source.slot_absent");
+
+  test("a returned row → present, ok falls back to present", async () => {
+    const r = await runCheck(rows({ "?column?": 1 }), slot, ["my_slot"]);
+    expect(r).toEqual({ id: "source.slot_absent", present: true, observed: null, ok: true });
+  });
+
+  test("no row → not present", async () => {
+    const r = await runCheck(rows(), slot, ["my_slot"]);
+    expect(r).toEqual({ id: "source.slot_absent", present: false, observed: null, ok: false });
+  });
+
+  test("params are forwarded to the query verbatim", async () => {
+    let seen: readonly unknown[] | undefined;
+    const spy: QueryFn = async (_sql, p) => {
+      seen = p;
+      return [];
+    };
+    await runCheck(spy, slot, ["region_migration_slot"]);
+    expect(seen).toEqual(["region_migration_slot"]);
+  });
+
+  test("existence checks carry no column or expect in the catalog", () => {
+    for (const id of ["source.slot_absent", "source.publication_absent"]) {
+      const c = check(id);
+      expect(c.detect.column).toBeUndefined();
+      expect(c.expect).toBeUndefined();
+      expect(c.detect.sql).toContain("$1");
+    }
   });
 });

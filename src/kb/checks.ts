@@ -11,6 +11,35 @@ import { type CheckItem, Checks } from "./schema.ts";
  */
 const RAW: CheckItem[] = [
   {
+    id: "source.slot_absent",
+    phase: "source-prep",
+    severity: "warn",
+    title: "stale replication slot",
+    // existence probe — $1 is bound to the configured slot name at run time
+    detect: { sql: "SELECT 1 FROM pg_replication_slots WHERE slot_name = $1" },
+    guidance:
+      "A replication slot left from a prior run blocks a clean start and pins WAL on the source. " +
+      "Drop it (pg_drop_replication_slot) or run `pgshift teardown` before re-replicating.",
+    provenance: {
+      source: "/docs/postgres/view-pg-replication-slots.md",
+      lastSynced: "2026-06-24",
+    },
+  },
+  {
+    id: "source.publication_absent",
+    phase: "source-prep",
+    severity: "warn",
+    title: "stale publication",
+    detect: { sql: "SELECT 1 FROM pg_publication WHERE pubname = $1" },
+    guidance:
+      "A publication left from a prior run is reused as-is; if its table set differs from config, " +
+      "drop it or run `pgshift teardown` first so the published set matches.",
+    provenance: {
+      source: "/docs/postgres/catalog-pg-publication.md",
+      lastSynced: "2026-06-24",
+    },
+  },
+  {
     id: "source.wal_level_logical",
     phase: "source-prep",
     severity: "fail",
@@ -41,22 +70,35 @@ export function check(id: string): CheckItem {
 
 export interface CheckResult {
   id: string;
-  /** The observed value from `detect.column`, or null when the probe returned no row. */
+  /** Did the probe return any row? The pass signal for existence checks. */
+  present: boolean;
+  /** The observed value from `detect.column`, or null (no column, or no row). */
   observed: string | null;
+  /** Value checks: observed === expect. Existence checks (no expect): falls back to `present`. */
   ok: boolean;
 }
 
-/** Runs the probe and queries `detect.column`. `query` returns the result rows. */
-export type QueryFn = (sql: string) => Promise<readonly Record<string, unknown>[]>;
+/** Runs the probe, binding `params` to `$1`-style placeholders, and returns the result rows. */
+export type QueryFn = (
+  sql: string,
+  params?: readonly unknown[],
+) => Promise<readonly Record<string, unknown>[]>;
 
 /**
- * Execute one check: run its `detect.sql`, read `detect.column` from the first row, compare to
- * `expect`. IO is injected as `query` so the comparison logic is unit-testable without a live
- * connection. doctor passes `(sql) => db.unsafe(sql)`.
+ * Execute one check: run `detect.sql` (binding `params`), then either read `detect.column`
+ * from the first row and compare to `expect` (value check), or report whether any row came
+ * back (existence check). IO is injected as `query` so the logic is unit-testable without a
+ * live connection. doctor passes `(sql, p) => db.unsafe(sql, p)`.
  */
-export async function runCheck(query: QueryFn, item: CheckItem): Promise<CheckResult> {
-  const rows = await query(item.detect.sql);
-  const raw = rows[0]?.[item.detect.column];
+export async function runCheck(
+  query: QueryFn,
+  item: CheckItem,
+  params?: readonly unknown[],
+): Promise<CheckResult> {
+  const rows = await query(item.detect.sql, params);
+  const present = rows.length > 0;
+  const raw = item.detect.column != null ? rows[0]?.[item.detect.column] : undefined;
   const observed = raw == null ? null : String(raw);
-  return { id: item.id, observed, ok: observed === item.expect };
+  const ok = item.expect != null ? observed === item.expect : present;
+  return { id: item.id, present, observed, ok };
 }
