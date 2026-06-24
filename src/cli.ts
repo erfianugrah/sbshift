@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { Command } from "commander";
 import { applyEnvFile, type Config, loadConfig, loadSecrets, loadToken } from "./config.ts";
 import { connect, type Db } from "./db.ts";
+import { DEFAULT_MAX_AGE_DAYS, kbDrift, renderDrift } from "./kb/drift.ts";
+import { providerHints } from "./kb/provider-hints.ts";
 import { log } from "./log.ts";
 import { MgmtApi } from "./mgmt.ts";
 import { runChaos, SCENARIOS, type ScenarioName } from "./rehearsal/chaos.ts";
@@ -347,6 +349,26 @@ program
   .action((dir, o) =>
     transferStorage(loadConfig(program.opts().config), dir, { dryRun: Boolean(o.dryRun) }),
   );
+
+// --- knowledge base ---
+const kb = program
+  .command("kb")
+  .description("knowledge base maintenance (provider hints + provenance)");
+
+kb.command("drift")
+  .description("flag KB items whose guidance hasn't been re-verified against its source recently")
+  .option("--max-age-days <n>", "staleness threshold in days", String(DEFAULT_MAX_AGE_DAYS))
+  .option("--json", "emit the drift report as JSON on stdout", false)
+  .action((o) => {
+    const report = kbDrift(providerHints, { maxAgeDays: Number(o.maxAgeDays) });
+    if (o.json) {
+      log.toStderr();
+      process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    } else {
+      renderDrift(report);
+    }
+    if (report.staleCount > 0) process.exitCode = 1;
+  });
 
 // --- rehearsal harness ---
 const rehearse = program.command("rehearse").description("rehearsal data harness (test rig)");
