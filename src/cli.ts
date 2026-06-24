@@ -4,6 +4,7 @@ import { Command } from "commander";
 import { applyEnvFile, type Config, loadConfig, loadSecrets, loadToken } from "./config.ts";
 import { connect, type Db } from "./db.ts";
 import { DEFAULT_MAX_AGE_DAYS, kbDrift, renderDrift } from "./kb/drift.ts";
+import { buildGuide, guidableProviders, renderGuide } from "./kb/guide.ts";
 import { providerHints } from "./kb/provider-hints.ts";
 import { log } from "./log.ts";
 import { MgmtApi } from "./mgmt.ts";
@@ -351,6 +352,34 @@ program
   );
 
 // --- knowledge base ---
+program
+  .command("guide <provider>")
+  .description(
+    `enablement playbook for a managed-Postgres provider (${guidableProviders().join(" | ")})`,
+  )
+  .option("--role <role>", "limit to the 'source' or 'target' role")
+  .option("--json", "emit the guide as JSON on stdout", false)
+  .action((provider, o) => {
+    const known = guidableProviders();
+    if (!known.includes(provider)) {
+      log.err(`no guide for '${provider}'. available: ${known.join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (o.role && o.role !== "source" && o.role !== "target") {
+      log.err("--role must be 'source' or 'target'");
+      process.exitCode = 1;
+      return;
+    }
+    const guide = buildGuide(provider, { role: o.role });
+    if (o.json) {
+      log.toStderr();
+      process.stdout.write(`${JSON.stringify(guide, null, 2)}\n`);
+    } else {
+      renderGuide(guide);
+    }
+  });
+
 const kb = program
   .command("kb")
   .description("knowledge base maintenance (provider hints + provenance)");
