@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { preppableEngines, sourcePrep, sourcePrepFor } from "../src/kb/engine-prep.ts";
+import {
+  buildEngineGuide,
+  preppableEngines,
+  sourcePrep,
+  sourcePrepFor,
+} from "../src/kb/engine-prep.ts";
 import { SourcePrepItems } from "../src/kb/schema.ts";
 
 describe("source-prep catalog", () => {
@@ -23,6 +28,27 @@ describe("source-prep catalog", () => {
   test("a guided/fail item never auto-applies and gates its phase", () => {
     const guided = sourcePrep.filter((i) => i.klass === "guided");
     for (const i of guided) expect(i.severity).toBe("fail");
+  });
+});
+
+describe("buildEngineGuide", () => {
+  test("groups items by phase in canonical migration order", () => {
+    const g = buildEngineGuide("sqlserver");
+    expect(g.engine).toBe("sqlserver");
+    expect(g.phases.map((p) => p.phase)).toEqual([
+      "preflight",
+      "source-prep",
+      "snapshot",
+      "cutover",
+    ]);
+    expect(g.itemCount).toBe(sourcePrepFor("sqlserver").length);
+  });
+
+  test("omits phases with no items and sums itemCount across phases", () => {
+    const g = buildEngineGuide("mysql");
+    expect(g.phases.every((p) => p.items.length > 0)).toBe(true);
+    expect(g.phases.reduce((n, p) => n + p.items.length, 0)).toBe(g.itemCount);
+    expect(g.itemCount).toBe(7);
   });
 });
 

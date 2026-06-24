@@ -1,4 +1,10 @@
-import { type SourcePrepEngine, type SourcePrepItem, SourcePrepItems } from "./schema.ts";
+import { log } from "../log.ts";
+import {
+  type Phase,
+  type SourcePrepEngine,
+  type SourcePrepItem,
+  SourcePrepItems,
+} from "./schema.ts";
 
 /**
  * Source-prep playbooks for the heterogeneous engines (HETEROGENEOUS.md §5 priority order:
@@ -321,4 +327,61 @@ export function sourcePrepFor(
   items: readonly SourcePrepItem[] = sourcePrep,
 ): SourcePrepItem[] {
   return items.filter((i) => i.engine === engine);
+}
+
+/** Canonical migration order — the phases an engine playbook is grouped + walked in (§5). */
+const PHASE_ORDER: Phase[] = [
+  "preflight",
+  "source-prep",
+  "target-prep",
+  "snapshot",
+  "cdc",
+  "reconcile",
+  "cutover",
+  "teardown",
+];
+
+export interface EngineGuidePhase {
+  phase: Phase;
+  items: SourcePrepItem[];
+}
+
+export interface EngineGuide {
+  engine: SourcePrepEngine;
+  /** Only phases with at least one item, in canonical migration order. */
+  phases: EngineGuidePhase[];
+  itemCount: number;
+}
+
+/** Assemble one engine's source-prep playbook, items grouped by phase in migration order. */
+export function buildEngineGuide(
+  engine: SourcePrepEngine,
+  items: readonly SourcePrepItem[] = sourcePrep,
+): EngineGuide {
+  const mine = sourcePrepFor(engine, items);
+  const phases: EngineGuidePhase[] = PHASE_ORDER.map((phase) => ({
+    phase,
+    items: mine.filter((i) => i.phase === phase),
+  })).filter((p) => p.items.length > 0);
+  return { engine, phases, itemCount: mine.length };
+}
+
+/** Human-readable render of an engine playbook via the structured logger (mirrors renderGuide). */
+export function renderEngineGuide(g: EngineGuide): void {
+  log.step(`guide: ${g.engine} source (${g.itemCount} item${g.itemCount === 1 ? "" : "s"})`);
+  log.info(
+    "heterogeneous source — these run via a Debezium ReplicationEngine (not built yet); " +
+      "guide is the reference, detect/verify SQL is shown for the operator to run by hand",
+  );
+  for (const { phase, items } of g.phases) {
+    log.info(`phase ${phase}:`);
+    for (const i of items) {
+      log.detail(`  [${i.severity}/${i.klass}] ${i.id} — ${i.title}`);
+      for (const line of i.guidance.split("\n")) log.detail(`    ${line}`);
+      if (i.detect) log.detail(`    detect: ${i.detect.sql}`);
+      if (i.verify) log.detail(`    verify: ${i.verify.sql}  → expect ${i.verify.expect}`);
+      log.detail(`    source: ${i.provenance.source} (synced ${i.provenance.lastSynced})`);
+    }
+  }
+  log.info("schema-translation + cutover items gate the run — see docs/GUIDED-MIGRATION.md §7");
 }

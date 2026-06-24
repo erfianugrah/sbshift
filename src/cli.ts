@@ -6,6 +6,7 @@ import { connect, type Db } from "./db.ts";
 import { engineFor } from "./engine/index.ts";
 import { checks } from "./kb/checks.ts";
 import { DEFAULT_MAX_AGE_DAYS, kbDrift, renderDrift } from "./kb/drift.ts";
+import { buildEngineGuide, preppableEngines, renderEngineGuide } from "./kb/engine-prep.ts";
 import { buildGuide, guidableProviders, renderGuide } from "./kb/guide.ts";
 import { providerHints } from "./kb/provider-hints.ts";
 import { log } from "./log.ts";
@@ -354,16 +355,31 @@ program
 
 // --- knowledge base ---
 program
-  .command("guide <provider>")
+  .command("guide <target>")
   .description(
-    `enablement playbook for a managed-Postgres provider (${guidableProviders().join(" | ")})`,
+    "enablement playbook for a migration source. managed-Postgres provider " +
+      `(${guidableProviders().join(" | ")}) or heterogeneous engine (${preppableEngines().join(" | ")})`,
   )
-  .option("--role <role>", "limit to the 'source' or 'target' role")
+  .option("--role <role>", "limit to the 'source' or 'target' role (PG providers only)")
   .option("--json", "emit the guide as JSON on stdout", false)
-  .action((provider, o) => {
+  .action((target, o) => {
+    // Heterogeneous source engines (mysql/sqlserver) route to the engine-prep playbook; managed
+    // Postgres providers route to the provider-hint guide. Disjoint id spaces, so dispatch on
+    // membership.
+    const engines = preppableEngines();
+    if (engines.includes(target)) {
+      const guide = buildEngineGuide(target);
+      if (o.json) {
+        log.toStderr();
+        process.stdout.write(`${JSON.stringify(guide, null, 2)}\n`);
+      } else {
+        renderEngineGuide(guide);
+      }
+      return;
+    }
     const known = guidableProviders();
-    if (!known.includes(provider)) {
-      log.err(`no guide for '${provider}'. available: ${known.join(", ")}`);
+    if (!known.includes(target)) {
+      log.err(`no guide for '${target}'. available: ${[...known, ...engines].join(", ")}`);
       process.exitCode = 1;
       return;
     }
@@ -372,7 +388,7 @@ program
       process.exitCode = 1;
       return;
     }
-    const guide = buildGuide(provider, { role: o.role });
+    const guide = buildGuide(target, { role: o.role });
     if (o.json) {
       log.toStderr();
       process.stdout.write(`${JSON.stringify(guide, null, 2)}\n`);
