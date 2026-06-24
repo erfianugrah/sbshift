@@ -1,0 +1,136 @@
+/**
+ * Renders the Debezium Server `application.properties` for a MySQL → Postgres migration — the
+ * fiddly half of the `debezium` engine's `replicate`, proven end-to-end by the spike at
+ * spike/debezium-mysql/. This module is pure string generation (no IO, no container), so the
+ * spike's hard-won config findings are encoded as executable, unit-tested code:
+ *
+ *   - finding #5: NEVER emit a `${...}` placeholder — Quarkus/SmallRye pre-expands it as its own
+ *     config-expression syntax and NPEs. Topic→table naming is done with a RegexRouter SMT whose
+ *     `$1` replacement has no braces. `assertNoConfigExpression` is a hard guard.
+ *   - finding #6: `schema.evolution=none` in production — pgshift pre-creates the target from the
+ *     `guided` schema-translation draft (GUIDED-MIGRATION.md §7); Debezium's `basic` auto-DDL
+ *     would land the wrong types. `basic` is allowed only for the spike/smoke harness.
+ *   - finding #7: no `ExtractNewRecordState` SMT — the JDBC sink ingests native change events.
+ *
+ * The output contains the target + source passwords in cleartext (it is mounted into the
+ * container as a file); callers MUST keep it out of logs.
+ */
+
+/** A MySQL source the Debezium MySQL connector captures from (spike-proven). SQL Server uses a
+ *  different connector + CDC change-tables and is not rendered yet (HETEROGENEOUS.md §6). */
+export interface DebeziumMySqlSource {
+  flavour: "mysql";
+  hostname: string;
+  port: number;
+  user: string;
+  password: string;
+  /** `SELECT @@server_id` — must be unique in the cluster (KB item mysql.binlog_enabled). */
+  serverId: number;
+  /** databases to capture, e.g. ["inventory"]. */
+  databases: string[];
+  /** schema-qualified tables, e.g. ["inventory.customers"]. */
+  tables: string[];
+}
+
+/** The Postgres/Supabase target the JDBC sink writes into. */
+export interface DebeziumTarget {
+  /** jdbc:postgresql://host:port/db */
+  jdbcUrl: string;
+  user: string;
+  password: string;
+}
+
+export interface DebeziumPlan {
+  /** Debezium topic prefix (logical server name). Topics are `<prefix>.<db>.<table>`. */
+  topicPrefix: string;
+  source: DebeziumMySqlSource;
+  target: DebeziumTarget;
+  /**
+   * `none` (production): pgshift pre-creates the target schema from the guided draft.
+   * `basic`: Debezium auto-creates/adds columns — spike/smoke only (finding #6).
+   */
+  schemaEvolution: "none" | "basic";
+  /** Writable dir in the container for file-based offset + schema-history storage. */
+  dataDir: string;
+}
+
+/** Throw if any value contains a `${...}` expression (spike finding #5 — would NPE the server). */
+export function assertNoConfigExpression(properties: string): void {
+  // match a literal `${` that opens an expression — the exact thing SmallRye pre-expands
+  if (/\$\{/.test(properties)) {
+    throw new Error(
+      // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal ${ is the guarded token
+      "Debezium Server config contains a ${...} expression, which Quarkus/SmallRye pre-expands " +
+        "and NPEs on (spike finding #5). Use a RegexRouter SMT with $1 (no braces) for topic→table " +
+        "naming, and never emit a literal ${ in any value.",
+    );
+  }
+}
+
+/** Escape a string for use inside a Java regex (the RegexRouter `regex` value). */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * Render the full `application.properties`. Deterministic line order (tests assert substrings).
+ * The RegexRouter strips the `<prefix>.<db>.` topic prefix so each source table lands in a bare
+ * target table name (e.g. `dbz.inventory.customers` → `customers`).
+ */
+export function renderDebeziumServerConfig(plan: DebeziumPlan): string {
+  const { topicPrefix, source, target, schemaEvolution, dataDir } = plan;
+  if (source.flavour !== "mysql") {
+    throw new Error(
+      `Debezium config rendering supports only mysql sources today; got '${source.flavour}'. ` +
+        "SQL Server uses a different connector + CDC change-tables and is not spiked yet " +
+        "(HETEROGENEOUS.md §6).",
+    );
+  }
+  if (source.tables.length === 0) throw new Error("Debezium plan has no source tables");
+  if (source.databases.length === 0) throw new Error("Debezium plan has no source databases");
+
+  // RegexRouter: match every `<prefix>.<anything>.<table>` and keep only the final segment.
+  // $1 has no braces, so it survives SmallRye (finding #5). One regex covers all databases.
+  const routeRegex = `${escapeRegex(topicPrefix)}\\.[^.]+\\.(.*)`;
+
+  const lines = [
+    "# Rendered by pgshift — Debezium Server MySQL → Postgres (no Kafka). DO NOT log: contains secrets.",
+    "",
+    "# ── source: MySQL connector ──",
+    "debezium.source.connector.class=io.debezium.connector.mysql.MySqlConnector",
+    `debezium.source.topic.prefix=${topicPrefix}`,
+    `debezium.source.database.hostname=${source.hostname}`,
+    `debezium.source.database.port=${source.port}`,
+    `debezium.source.database.user=${source.user}`,
+    `debezium.source.database.password=${source.password}`,
+    `debezium.source.database.server.id=${source.serverId}`,
+    `debezium.source.database.include.list=${source.databases.join(",")}`,
+    `debezium.source.table.include.list=${source.tables.join(",")}`,
+    `debezium.source.offset.storage.file.filename=${dataDir}/offsets.dat`,
+    "debezium.source.offset.flush.interval.ms=0",
+    "debezium.source.schema.history.internal=io.debezium.storage.file.history.FileSchemaHistory",
+    `debezium.source.schema.history.internal.file.filename=${dataDir}/schema_history.dat`,
+    "",
+    "# ── sink: JDBC straight into Postgres ──",
+    "debezium.sink.type=jdbc",
+    `debezium.sink.jdbc.connection.url=${target.jdbcUrl}`,
+    `debezium.sink.jdbc.connection.username=${target.user}`,
+    `debezium.sink.jdbc.connection.password=${target.password}`,
+    "debezium.sink.jdbc.insert.mode=upsert",
+    "debezium.sink.jdbc.primary.key.mode=record_key",
+    "debezium.sink.jdbc.delete.enabled=true",
+    `debezium.sink.jdbc.schema.evolution=${schemaEvolution}`,
+    "",
+    "# ── topic→table naming via RegexRouter ($1 replacement, never a brace-expression — finding #5) ──",
+    "debezium.transforms=route",
+    "debezium.transforms.route.type=org.apache.kafka.connect.transforms.RegexRouter",
+    `debezium.transforms.route.regex=${routeRegex}`,
+    "debezium.transforms.route.replacement=$1",
+    "",
+    "quarkus.http.port=8080",
+    "",
+  ];
+  const out = lines.join("\n");
+  assertNoConfigExpression(out);
+  return out;
+}

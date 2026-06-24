@@ -38,6 +38,7 @@ mock.module("../src/steps/teardown.ts", () => ({
 }));
 
 const { NativePgEngine } = await import("../src/engine/native-pg.ts");
+const { DebeziumEngine } = await import("../src/engine/debezium.ts");
 const { engineFor } = await import("../src/engine/index.ts");
 
 // Opaque sentinels — the engine only forwards them, never inspects them.
@@ -101,8 +102,24 @@ describe("engineFor", () => {
     expect(engineFor(cfgWith("postgres"))).not.toBe(engineFor(cfgWith("postgres")));
   });
 
-  test("fails loud for heterogeneous engines (Debezium not built yet)", () => {
-    expect(() => engineFor(cfgWith("mysql"))).toThrow(/Debezium replication engine/);
-    expect(() => engineFor(cfgWith("sqlserver"))).toThrow(/not implemented yet/);
+  test("returns the debezium engine for heterogeneous sources", () => {
+    expect(engineFor(cfgWith("mysql")).kind).toBe("debezium");
+    expect(engineFor(cfgWith("sqlserver")).kind).toBe("debezium");
+  });
+});
+
+describe("DebeziumEngine", () => {
+  const engine = new DebeziumEngine();
+
+  test("kind is debezium", () => {
+    expect(engine.kind).toBe("debezium");
+  });
+
+  test("every lifecycle method fails loud (runtime gated on the vehicle decision)", async () => {
+    await expect(engine.replicate(src, tgt, cfg, secrets)).rejects.toThrow(/not implemented yet/);
+    await expect(engine.watch(src, tgt, cfg)).rejects.toThrow(/not implemented yet/);
+    await expect(engine.reconcile(src, tgt, cfg)).rejects.toThrow(/not implemented yet/);
+    await expect(engine.cutover(src, tgt, cfg, {})).rejects.toThrow(/not implemented yet/);
+    await expect(engine.teardown(src, tgt, cfg)).rejects.toThrow(/not implemented yet/);
   });
 });

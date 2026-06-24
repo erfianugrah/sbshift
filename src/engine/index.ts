@@ -1,7 +1,9 @@
 import type { Config } from "../config.ts";
+import { DebeziumEngine } from "./debezium.ts";
 import { NativePgEngine } from "./native-pg.ts";
 import type { ReplicationEngine } from "./types.ts";
 
+export { DebeziumEngine } from "./debezium.ts";
 export { NativePgEngine } from "./native-pg.ts";
 export type { CutoverOpts, EngineKind, ReconcileOpts, ReplicationEngine } from "./types.ts";
 
@@ -10,10 +12,11 @@ export type { CutoverOpts, EngineKind, ReconcileOpts, ReplicationEngine } from "
  *
  * Dispatches on the source engine declared in config. `postgres` — the default, and today's
  * only working path — maps to native logical replication (`NativePgEngine`). The heterogeneous
- * engines (`mysql`, `sqlserver`) map to the Debezium CDC impl, which isn't built yet
- * (HETEROGENEOUS.md §5); they fail loud here rather than silently running the native path on a
- * source that can't speak it. Centralising the choice keeps every caller — `run` and the
- * individual CLI commands — engine-agnostic.
+ * engines (`mysql`, `sqlserver`) map to the `DebeziumEngine`: its config rendering is real and
+ * tested, but its lifecycle methods fail loud (the container runtime is gated on the
+ * delivery-vehicle decision — HETEROGENEOUS.md §5, spike finding #1). Returning the engine here
+ * rather than throwing keeps the seam structurally complete and every caller engine-agnostic;
+ * the loud failure surfaces at the first lifecycle call instead.
  */
 export function engineFor(cfg: Config): ReplicationEngine {
   switch (cfg.source.engine) {
@@ -21,8 +24,6 @@ export function engineFor(cfg: Config): ReplicationEngine {
       return new NativePgEngine();
     case "mysql":
     case "sqlserver":
-      throw new Error(
-        `source.engine="${cfg.source.engine}" needs the Debezium replication engine, which is not implemented yet (see docs/HETEROGENEOUS.md §5). Only "postgres" sources are supported today.`,
-      );
+      return new DebeziumEngine();
   }
 }
