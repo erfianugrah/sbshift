@@ -255,6 +255,49 @@ const SQLSERVER: SourcePrepItem[] = [
     },
   },
   {
+    id: "sqlserver.azure_tier",
+    engine: "sqlserver",
+    phase: "source-prep",
+    severity: "fail",
+    klass: "informed",
+    title: "Azure SQL Database tier supports CDC",
+    guidance:
+      "Azure SQL Database CDC needs any vCore tier (GeneralPurpose / BusinessCritical / " +
+      "Hyperscale) or DTU S3+. Basic / S0 / S1 / S2 canNOT be a CDC source, so the migration must " +
+      "fail here rather than at connector start. Scale the source up before migrating. N/A for " +
+      "non-Azure-SQL-DB sources (Managed Instance and VM/on-prem all support CDC regardless).",
+    detect: {
+      sql: "SELECT SERVERPROPERTY('EngineEdition') AS engine_edition, DATABASEPROPERTYEX(DB_NAME(),'ServiceObjective') AS service_objective",
+    },
+    verify: {
+      sql: "SELECT DATABASEPROPERTYEX(DB_NAME(),'ServiceObjective')   -- Azure SQL DB only",
+      expect: "any vCore SLO, or DTU S3+ (NOT Basic/S0/S1/S2)",
+    },
+    assert: {
+      // EngineEdition 5 = Azure SQL DB; the tier gate is N/A on any other edition (MI/VM/on-prem).
+      // DATABASEPROPERTYEX(...,'ServiceObjective') is a built-in on every edition, so this compiles
+      // on box SQL Server too (unlike sys.database_service_objectives, which is Azure-only).
+      sql:
+        "SELECT CASE " +
+        "WHEN CAST(SERVERPROPERTY('EngineEdition') AS int) <> 5 THEN 'ok' " +
+        "WHEN CAST(DATABASEPROPERTYEX(DB_NAME(),'ServiceObjective') AS varchar(128)) IN ('Basic','S0','S1','S2') THEN 'blocked' " +
+        "ELSE 'ok' END AS tier_ok",
+      rules: [
+        {
+          kind: "eq",
+          column: "tier_ok",
+          value: "ok",
+          label: "Azure SQL DB tier is CDC-capable (vCore any, or DTU S3+; not Basic/S0/S1/S2)",
+        },
+      ],
+    },
+    provenance: {
+      source:
+        "https://learn.microsoft.com/en-us/azure/azure-sql/database/change-data-capture-overview",
+      lastSynced: "2026-07-01",
+    },
+  },
+  {
     id: "sqlserver.cdc_enable",
     engine: "sqlserver",
     phase: "source-prep",

@@ -6,6 +6,7 @@ import {
   sourcePrepFor,
 } from "../src/kb/engine-prep.ts";
 import { SourcePrepItems } from "../src/kb/schema.ts";
+import { evalRule } from "../src/kb/source-prep-eval.ts";
 
 describe("source-prep catalog", () => {
   test("the whole catalog parses against the schema", () => {
@@ -124,12 +125,34 @@ describe("SQL Server / Azure SQL source-prep playbook (§7b)", () => {
   test("covers flavour preflight, CDC enablement, the guided translation, and identity resync", () => {
     expect(items.map((i) => i.id)).toEqual([
       "sqlserver.flavour",
+      "sqlserver.azure_tier",
       "sqlserver.cdc_enable",
       "sqlserver.cdc_retention",
       "sqlserver.change_tracking_alt",
       "sqlserver.schema_translation",
       "sqlserver.identity_resync",
     ]);
+  });
+
+  test("azure_tier is a fail-severity source-prep gate that asserts a computed tier_ok verdict", () => {
+    const t = byId("sqlserver.azure_tier");
+    expect(t.phase).toBe("source-prep");
+    expect(t.severity).toBe("fail");
+    expect(t.assert?.rules).toEqual([
+      expect.objectContaining({ kind: "eq", column: "tier_ok", value: "ok" }),
+    ]);
+    // built-in function, compiles on every edition (not the Azure-only catalog view)
+    expect(t.assert?.sql).toContain("DATABASEPROPERTYEX");
+    expect(t.assert?.sql).toContain("EngineEdition");
+    expect(t.assert?.sql).toContain("'Basic','S0','S1','S2'");
+  });
+
+  test("azure_tier verdict: N/A off-Azure, ok on vCore/S3+, blocked on Basic/S0-S2", () => {
+    const rule = byId("sqlserver.azure_tier").assert?.rules[0];
+    if (!rule) throw new Error("azure_tier assert rule missing");
+    // The DB computes tier_ok; doctor only judges its value. Simulate each server-side outcome.
+    expect(evalRule(rule, [{ tier_ok: "ok" }]).ok).toBe(true); // off-Azure or vCore or DTU S3+
+    expect(evalRule(rule, [{ tier_ok: "blocked" }]).ok).toBe(false); // DTU Basic/S0/S1/S2
   });
 
   test("flavour is a preflight informed item probing EngineEdition (the discovery question)", () => {

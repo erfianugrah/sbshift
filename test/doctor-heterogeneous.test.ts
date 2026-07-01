@@ -128,6 +128,7 @@ function fakeSs(responder: (sql: string) => Record<string, unknown>[]): {
 describe("doctor — heterogeneous SQL Server source (live engine-prep checks)", () => {
   test("a CDC-enabled Enterprise source passes the asserted checks", async () => {
     const healthy = (sql: string): Record<string, unknown>[] => {
+      if (sql.includes("tier_ok")) return [{ tier_ok: "ok" }]; // edition 3 => off-Azure => gate N/A
       if (sql.includes("EngineEdition")) return [{ edition: "3" }];
       if (sql.includes("is_cdc_enabled")) return [{ is_cdc_enabled: "1" }];
       return [];
@@ -137,12 +138,13 @@ describe("doctor — heterogeneous SQL Server source (live engine-prep checks)",
       sqlServerConnect: fakeSs(healthy).connect,
     });
     expect(r.fail).toBe(0);
-    expect(r.pass).toBeGreaterThanOrEqual(2); // flavour + cdc_enable assert pass
+    expect(r.pass).toBeGreaterThanOrEqual(3); // flavour + azure_tier + cdc_enable asserts pass
   });
 
   test("Express edition + CDC disabled: both fail-severity asserts fail", async () => {
     const bad = (sql: string): Record<string, unknown>[] => {
-      if (sql.includes("EngineEdition")) return [{ edition: "4" }]; // Express — no CDC
+      if (sql.includes("tier_ok")) return [{ tier_ok: "ok" }]; // Express is off-Azure => gate N/A
+      if (sql.includes("EngineEdition")) return [{ edition: "4" }]; // Express - no CDC
       if (sql.includes("is_cdc_enabled")) return [{ is_cdc_enabled: "0" }];
       return [];
     };
@@ -151,6 +153,20 @@ describe("doctor — heterogeneous SQL Server source (live engine-prep checks)",
       sqlServerConnect: fakeSs(bad).connect,
     });
     expect(r.fail).toBeGreaterThanOrEqual(2);
+  });
+
+  test("Azure SQL DB on a blocked DTU tier (S2) fails the tier gate", async () => {
+    const blockedTier = (sql: string): Record<string, unknown>[] => {
+      if (sql.includes("tier_ok")) return [{ tier_ok: "blocked" }]; // EngineEdition 5 + S2
+      if (sql.includes("EngineEdition")) return [{ edition: "5" }]; // Azure SQL DB
+      if (sql.includes("is_cdc_enabled")) return [{ is_cdc_enabled: "1" }];
+      return [];
+    };
+    const r = await doctor(sqlServerCfg(), ssSecrets(), {
+      sourceOnly: true,
+      sqlServerConnect: fakeSs(blockedTier).connect,
+    });
+    expect(r.fail).toBeGreaterThanOrEqual(1); // the azure_tier gate fires before connector start
   });
 
   test("an UNREACHABLE SQL Server source is a single fail, not a crash", async () => {
