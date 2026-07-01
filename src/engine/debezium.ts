@@ -36,6 +36,52 @@ type SourceConn = {
   end(): Promise<void>;
 };
 
+/** Retention-watchdog verdict for one poll of the heterogeneous initial sync. */
+export type RetentionVerdict =
+  | { level: "ok" }
+  | { level: "warn"; message: string }
+  | { level: "abort"; message: string };
+
+/**
+ * Pure: compare elapsed initial-sync time against the SOURCE change-log retention window (the CDC
+ * analogue of the native WAL watchdog, HETEROGENEOUS.md §6). `retentionSec === null` means the
+ * window is unbounded/unknown, so the watchdog no-ops. Warn once elapsed reaches `warnFraction`
+ * of the window; hard-abort once it meets/exceeds the full window -- past that point the source
+ * cleanup job (MySQL binlog purge / SQL Server CDC cleanup) may already be deleting change rows
+ * the JDBC sink has not consumed, which the downgraded reconcile cannot detect => silent data loss.
+ */
+export function evaluateRetentionHeadroom(args: {
+  elapsedSec: number;
+  retentionSec: number | null;
+  warnFraction: number;
+  engineLabel: string;
+}): RetentionVerdict {
+  const { elapsedSec, retentionSec, warnFraction, engineLabel } = args;
+  if (retentionSec === null || retentionSec <= 0) return { level: "ok" };
+  const used = elapsedSec / retentionSec;
+  const mins = (s: number) => `${Math.round(s / 60)}min`;
+  if (used >= 1) {
+    return {
+      level: "abort",
+      message:
+        `retention watchdog: initial sync has run ${mins(elapsedSec)}, at or past the source ` +
+        `${engineLabel} window (${mins(retentionSec)}). Change rows may already be purged before ` +
+        `the sink consumed them; aborting to avoid silent data loss. Raise ${engineLabel} at the ` +
+        `source and re-run, or migrate a smaller table set.`,
+    };
+  }
+  if (used >= warnFraction) {
+    return {
+      level: "warn",
+      message:
+        `retention watchdog: initial sync at ${mins(elapsedSec)} of the ${mins(retentionSec)} ` +
+        `source ${engineLabel} window (${Math.round(used * 100)}%). If the snapshot outruns ` +
+        `retention, change rows are purged before the sink reads them. Raise ${engineLabel}.`,
+    };
+  }
+  return { level: "ok" };
+}
+
 /**
  * The IO seam the DebeziumEngine drives — Docker process control + an HTTP health probe + file
  * staging. Injected so the orchestration logic (right argv, polls health, fails on timeout,
@@ -156,6 +202,40 @@ export class DebeziumEngine implements ReplicationEngine {
     return engine === "sqlserver" ? this.sqlServerConnect(url) : this.mysqlConnect(url);
   }
 
+  /**
+   * SOURCE change-log retention window in seconds, or null if unbounded/unknown, for the watch()
+   * retention watchdog:
+   *  - mysql: `@@binlog_expire_logs_seconds` (0 => no automatic purge => unbounded).
+   *  - sqlserver: the CDC cleanup job's `retention` (minutes) from `msdb.dbo.cdc_jobs` for this DB.
+   * A probe failure (e.g. the login lacks msdb access) is NON-fatal: log + return null so the
+   * watchdog no-ops rather than blocking a migration on a diagnostic query.
+   */
+  private async sourceRetentionSeconds(
+    engine: "mysql" | "sqlserver",
+    conn: SourceConn,
+  ): Promise<number | null> {
+    try {
+      if (engine === "mysql") {
+        const [r] = await conn.query<{ s: number | string | null }>(
+          "SELECT @@binlog_expire_logs_seconds AS s",
+        );
+        const s = r?.s == null ? 0 : Number(r.s);
+        return Number.isFinite(s) && s > 0 ? s : null;
+      }
+      const [r] = await conn.query<{ retention: number | string | null }>(
+        "SELECT retention FROM msdb.dbo.cdc_jobs WHERE job_type = 'cleanup' AND database_id = DB_ID()",
+      );
+      const min = r?.retention == null ? 0 : Number(r.retention);
+      return Number.isFinite(min) && min > 0 ? min * 60 : null;
+    } catch (e) {
+      log.warn(
+        `retention watchdog: could not read source ${engine} change-log retention ` +
+          `(${e instanceof Error ? e.message : String(e)}); watchdog disabled for this run`,
+      );
+      return null;
+    }
+  }
+
   /** Stage the rendered config, launch the Debezium container, and wait for it to report healthy. */
   async replicate(_source: Db, _target: Db, cfg: Config, secrets: Secrets): Promise<void> {
     const plan = debeziumPlanFromConfig(cfg, secrets); // throws for non-mysql sources
@@ -223,9 +303,32 @@ export class DebeziumEngine implements ReplicationEngine {
     log.step("watch (debezium) — connector health + initial-sync catch-up");
 
     const my = await this.openSource(engine, url);
+    const started = Date.now();
+    const warnFraction = cfg.watchdog.retentionWarnFraction;
+    const retentionLabel = engine === "sqlserver" ? "CDC cleanup retention" : "binlog expiry";
+    const retentionSec = await this.sourceRetentionSeconds(engine, my);
+    if (retentionSec !== null) {
+      log.detail(
+        `retention watchdog armed: source ${retentionLabel} = ${Math.round(retentionSec / 60)}min ` +
+          `(warn at ${Math.round(warnFraction * 100)}%, abort at 100%)`,
+      );
+    }
+    let retentionWarned = false;
     let unreachable = 0;
     try {
       for (;;) {
+        const verdict = evaluateRetentionHeadroom({
+          elapsedSec: (Date.now() - started) / 1000,
+          retentionSec,
+          warnFraction,
+          engineLabel: retentionLabel,
+        });
+        if (verdict.level === "abort") throw new Error(verdict.message);
+        if (verdict.level === "warn" && !retentionWarned) {
+          log.warn(verdict.message);
+          retentionWarned = true;
+        }
+
         const res = await this.io.httpText(healthUrl);
         if (!res) {
           if (++unreachable >= 5) {

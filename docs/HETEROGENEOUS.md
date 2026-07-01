@@ -222,7 +222,12 @@ notes that shaped the `debezium` impl for this source:
   (no SQL Server Agent); MI and VM use Agent jobs. The connector config + health checks differ.
 - **CDC retention is the watchdog input** — default 3-day cleanup; a stalled migration past
   retention loses change rows (the SQL Server analogue of Neon's 40h slot reaping and MySQL's
-  binlog purge). `watch` must alarm on retention headroom.
+  binlog purge). **DELIVERED**: `watch` now arms a retention watchdog (`sourceRetentionSeconds`
+  reads the CDC cleanup job's retention from `msdb.dbo.cdc_jobs`, or `@@binlog_expire_logs_seconds`
+  for MySQL), warns at `watchdog.retentionWarnFraction` (default 0.8) of the window and hard-aborts
+  at 1.0 (the CDC analogue of the WAL watchdog). Verdict logic is the pure, unit-tested
+  `evaluateRetentionHeadroom` (test/retention-watchdog.test.ts); a probe failure degrades to a
+  no-op rather than blocking the run.
 - **Heavier schema translation** — T-SQL → PL/pgSQL is a larger rewrite than MySQL's, so the
   `guided` schema gate (§7b) carries more weight and SSMA/SCT cross-validation matters more.
 - **`HIERARCHYID` / `GEOGRAPHY` / `GEOMETRY` / `sql_variant`** have no clean Postgres target —

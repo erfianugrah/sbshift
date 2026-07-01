@@ -99,6 +99,14 @@ export const ConfigSchema = z.object({
     pollIntervalSec: z.number().int().positive().default(5),
     /** Max minutes to wait for initial sync to reach 'r' before giving up. */
     syncTimeoutMin: z.number().int().positive().default(240),
+    /**
+     * Heterogeneous (Debezium) engines only: warn once the initial-sync elapsed time reaches
+     * this fraction of the SOURCE change-log retention window (MySQL binlog expiry / SQL Server
+     * CDC cleanup retention), and hard-abort at 1.0. Guards against a slow snapshot outrunning
+     * retention and silently losing change rows -- the CDC analogue of the WAL watchdog. Native
+     * Postgres logical replication ignores it (the slot pins WAL, so maxRetainedWalMb applies).
+     */
+    retentionWarnFraction: z.number().positive().max(1).default(0.8),
   }),
 
   /** Which config sections to copy via the Management API. */
