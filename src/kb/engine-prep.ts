@@ -429,8 +429,8 @@ export function buildEngineGuide(
 export function renderEngineGuide(g: EngineGuide): void {
   log.step(`guide: ${g.engine} source (${g.itemCount} item${g.itemCount === 1 ? "" : "s"})`);
   log.info(
-    "heterogeneous source — these run via a Debezium ReplicationEngine (not built yet); " +
-      "guide is the reference, detect/verify SQL is shown for the operator to run by hand",
+    "heterogeneous source - these run via the Debezium ReplicationEngine; the guide is the " +
+      "reference, detect/verify SQL is shown for the operator to run by hand",
   );
   for (const { phase, items } of g.phases) {
     log.info(`phase ${phase}:`);
