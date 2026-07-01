@@ -27,7 +27,7 @@ bun run test/heterogeneous/harness-sqlserver.ts   # SQL Server source
 
 The harness self-contains the whole sequence (exit 0 = PASS):
 
-1. **build** the engine image `pgshift/debezium-server:3.6.0.Beta2` from `images/debezium-server/`;
+1. **build** the engine image `pgshift/debezium-server:3.6.0.CR1` from `images/debezium-server/`;
 2. **up** MySQL (`example-mysql`, 4 seeded `inventory.customers`) + an EMPTY Postgres target on
    the `pgshift-dbz-it` network, published to host ports `53306` / `55432`;
 3. **schema-translate** — `draftTargetSchema()` reads the MySQL `information_schema`, drafts the
@@ -76,7 +76,7 @@ health on `18081`:
   ┌───────────┐        ┌──────────────────────────┐        ┌────────────┐
   │  mysql    │binlog─▶ │ pgshift-dbz-dbz           │ JDBC ─▶ │ postgres   │
   │ inventory │        │ (engine.replicate spawned) │        │  target    │
-  └───────────┘        │  Debezium Server 3.6.0.Beta2│        └────────────┘
+  └───────────┘        │  Debezium Server 3.6.0.CR1│        └────────────┘
                        └──────────────────────────┘
        ▲ 53306                  ▲ 18080 (/q/health)            ▲ 55432
        └──── harness exec inserts          health probe        harness row asserts ┘
@@ -97,6 +97,6 @@ harness addresses them by published host ports for its own inserts + assertions.
 ## Status
 
 The full lifecycle (replicate / reconcile / watch / cutover / teardown) is exercised and passes
-against real Debezium 3.6.0.Beta2 + MySQL 8.2 + Postgres 16. The SQL Server harness
+against real Debezium 3.6.0.CR1 + MySQL 8.2 + Postgres 16. The SQL Server harness
 (`harness-sqlserver.ts`) mirrors it against SQL Server 2022 (Developer, CDC) + Postgres 16. See
 [`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5–6.

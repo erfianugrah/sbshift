@@ -8,7 +8,7 @@ maintained asset.
 ## Build
 
 ```bash
-docker build -t pgshift/debezium-server:3.6.0.Beta2 images/debezium-server/
+docker build -t pgshift/debezium-server:3.6.0.CR1 images/debezium-server/
 ```
 
 The tag must match the pin in [`src/engine/debezium-runtime.ts`](../../src/engine/debezium-runtime.ts)
@@ -27,10 +27,11 @@ A Maven stage resolves `jdbc-sink.pom.xml` and copies the jars into `/debezium/l
 
 ## Version pin
 
-`debezium-server-jdbc` and the `FROM` server image are pinned **together** at `3.6.0.Beta2`. The
-JDBC sink is a 3.6-only, not-yet-GA feature; the newer `3.6.0.CR1` *jar* exists but there is no
-`3.6.0.CR1` server *image*, so CR1-jar-on-Beta2-core would be an unsupported skew. Re-pin both
-when a matching image+jar pair ships (ideally `3.6.0.Final`) and flip `DEBEZIUM_RUNTIME_GA`. See
+`debezium-server-jdbc` and the `FROM` server image are pinned **together** at `3.6.0.CR1`. The
+JDBC sink is a 3.6-only, not-yet-GA feature; both the `3.6.0.CR1` server *image* and the matching
+`3.6.0.CR1` sink *jar* now ship (re-pinned Beta2 -> CR1 on 2026-07-01), so there is no core/sink
+skew. `3.6.0.Final` is still unscheduled, so this stays a pre-release and `DEBEZIUM_RUNTIME_GA`
+stays `false`. Re-pin both to Final when a matching image+jar pair ships. See
 [`docs/HETEROGENEOUS.md`](../../docs/HETEROGENEOUS.md) §5 for the full delivery-vehicle decision.
 
 ## How the engine runs it

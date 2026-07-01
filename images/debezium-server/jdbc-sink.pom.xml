@@ -5,8 +5,9 @@
      no target-DB driver. This pom IS that manifest (spike finding #3).
 
      VERSION PIN: debezium-server-jdbc MUST match the server-core version in the Dockerfile FROM
-     (3.6.0.Beta2). The newer 3.6.0.CR1 jar exists on Maven Central but there is no CR1 server
-     image, so CR1-on-Beta2 would be an unsupported skew (HETEROGENEOUS.md §5). -->
+     (3.6.0.CR1). As of 2026-07-01 the CR1 server image + matching CR1 sink jar both ship
+     (re-pinned Beta2 -> CR1); no CR1-on-Beta2 skew. 3.6.0.Final is still unscheduled
+     (HETEROGENEOUS.md §5). -->
 <project xmlns="http://maven.apache.org/POM/4.0.0">
   <modelVersion>4.0.0</modelVersion>
   <groupId>dev.pgshift</groupId>
@@ -17,7 +18,7 @@
     <dependency>
       <groupId>io.debezium</groupId>
       <artifactId>debezium-server-jdbc</artifactId>
-      <version>3.6.0.Beta2</version>
+      <version>3.6.0.CR1</version>
     </dependency>
     <dependency>
       <groupId>org.postgresql</groupId>

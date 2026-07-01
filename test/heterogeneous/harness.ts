@@ -67,7 +67,7 @@ const mysql = (sql: string) =>
 
 async function main() {
   console.log("── build the engine image ──");
-  sh(["docker", "build", "-t", "pgshift/debezium-server:3.6.0.Beta2", "images/debezium-server/"]);
+  sh(["docker", "build", "-t", "pgshift/debezium-server:3.6.0.CR1", "images/debezium-server/"]);
 
   console.log("── bring up MySQL + Postgres ──");
   sh([...COMPOSE, "up", "-d", "--wait"]);

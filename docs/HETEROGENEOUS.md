@@ -129,26 +129,30 @@ or fall back to single-node Kafka Connect. Resolved by checking the actual gatin
 
 - `io.debezium:debezium-server-jdbc` on Maven Central — newest **`3.6.0.CR1`**, no `3.6.0.Final`
   (`maven-metadata.xml` lastUpdated 2026-06-23). The no-Kafka JDBC sink exists only from 3.6.0.Alpha2.
-- quay.io/debezium/server images — the 3.6 line is published only up to **`3.6.0.Beta2`** (no CR1
-  or Final image); the newest GA `Final` overall is `3.5.2.Final`, which has **no** JDBC sink.
+- quay.io/debezium/server images - on 2026-06-24 the 3.6 line was published only up to
+  **`3.6.0.CR1`** (no CR1 or Final image); the newest GA `Final` overall is `3.5.2.Final`, which
+  has **no** JDBC sink.
 
 So **wait-for-GA is blocked** (3.6 GA unscheduled; CR1 jar only landed the day before) and the
 **Kafka-Connect fallback reintroduces the Kafka dependency §1 rejected**. Decision: **pin the 3.6
-pre-release — `3.6.0.Beta2`**. NOT the newer CR1 jar: the custom image layers the JDBC-sink jar
-onto the stock server image (finding #3), so the sink jar must MATCH the server-core version in
-the base image — and the base image tops out at Beta2, so a CR1 jar would run on a Beta2 core (an
-unsupported skew). Beta2 is the highest version available as BOTH a server image AND a sink jar,
-and is exactly the combo the spike proved end-to-end. The pre-release risk is acceptable because
-finding #2 already makes pgshift's reconcile + fail-closed cutover load-bearing — the engine never
-trusts the sink's delivery guarantees, GA or not. The pin lives as a typed constant in
+pre-release**. The custom image layers the JDBC-sink jar onto the stock server image (finding #3),
+so the sink jar must MATCH the server-core version in the base image. On 2026-06-24 the base image
+topped out at Beta2 (no CR1 image), so both were pinned at Beta2. The pre-release risk is
+acceptable because finding #2 already makes pgshift's reconcile + fail-closed cutover load-bearing
+- the engine never trusts the sink's delivery guarantees, GA or not.
+
+**RE-PIN (2026-07-01): Beta2 -> `3.6.0.CR1`.** `quay.io/debezium/server:3.6.0.CR1` has since
+shipped and the matching `debezium-server-jdbc:3.6.0.CR1` jar is on Maven Central, so the matched
+image+jar pair now exists at CR1 (one step closer to GA, no core/sink skew). `3.6.0.Final` is
+still unscheduled, so this stays a pre-release. The pin lives as a typed constant in
 [`src/engine/debezium-runtime.ts`](../src/engine/debezium-runtime.ts) (`DEBEZIUM_SERVER_VERSION`,
-`DEBEZIUM_RUNTIME_GA=false`); re-pin upward only when a matching image+jar pair ships (ideally
-`3.6.0.Final`) and flip the GA flag.
+`DEBEZIUM_RUNTIME_GA=false`); re-pin CR1 -> Final only when a matching Final image+jar pair ships
+and flip the GA flag.
 
 ### Runtime — IMPLEMENTED + harness-verified (2026-06-24)
 
 The full `DebeziumEngine` lifecycle is built and proven end-to-end against real Debezium
-3.6.0.Beta2 + MySQL 8.2 + Postgres 16 by the Docker harness (`test/heterogeneous/`, PASS):
+3.6.0.CR1 + MySQL 8.2 + Postgres 16 by the Docker harness (`test/heterogeneous/`, PASS):
 
 - **`replicate`** — render config → stage 0600 → `docker run` the pinned image → poll `/q/health`.
 - **`reconcile`** — count + portable per-column aggregates on the MySQL source + PG target via the
@@ -205,7 +209,7 @@ The SQL Server engine is implemented end-to-end and forks cleanly off `cfg.sourc
   `is_cdc_enabled` asserts).
 - **harness** — `test/heterogeneous/harness-sqlserver.ts` + `docker-compose.sqlserver.yml`,
   **green end-to-end in CI** (the `heterogeneous` job) against real SQL Server 2022 (Developer,
-  CDC) + Debezium 3.6.0.Beta2 + Postgres 16.
+  CDC) + Debezium 3.6.0.CR1 + Postgres 16.
 
 The Debezium **SQL Server connector** captures from SQL Server **CDC change-tables**, not a
 binlog — so the source-prep playbook (see [`GUIDED-MIGRATION.md`](GUIDED-MIGRATION.md) §7b)
