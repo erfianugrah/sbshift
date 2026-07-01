@@ -69,6 +69,26 @@ health on `18081`:
 > `MSSQL_AGENT_ENABLED=true`. The capture job polls roughly every 5s, so the snapshot/CDC waits
 > allow extra tries vs the MySQL harness.
 
+## Real-cloud rehearsal (`rehearse-cloud.ts`)
+
+The two harnesses above stand up throwaway Docker sources. To rehearse against a **real managed
+cloud source** (Azure SQL Database / Managed Instance, or Amazon RDS / Aurora MySQL) + a real
+Postgres target -- the beta -> stable evidence step -- use the cloud rehearsal harness:
+
+```bash
+# config: $PGSHIFT_CONFIG (default ./migrate.config.yaml); secrets: $SOURCE_DB_URL / $TARGET_DB_URL
+bun run test/heterogeneous/rehearse-cloud.ts
+# PGSHIFT_REHEARSE_SKIP_TRANSLATE=1  -> skip the schema draft/apply (already applied)
+```
+
+It drives the REAL engine (`translate --apply` -> `replicate` -> `watch` -> `reconcile` ->
+`teardown`) against endpoints YOU prepared, loading config + secrets exactly as the CLI does.
+**It never stops source writes and never cuts over** -- the source is left untouched. The Debezium
+container runs on your machine and connects OUT to the cloud source, so `SOURCE_DB_URL` must be
+the public endpoint (add `?encrypt=true` for Azure SQL) and the source firewall must allow your
+egress IP. Full source-prep + connectivity + cost notes:
+[`docs/GUIDED-MIGRATION.md`](../../docs/GUIDED-MIGRATION.md) §8b.
+
 ## Topology
 
 ```

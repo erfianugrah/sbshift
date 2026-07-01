@@ -386,6 +386,63 @@ right item. No engine changes — this is valuable on its own, independent of he
 
 ---
 
+## 8b. Real-cloud rehearsal (the beta -> stable evidence step)
+
+The heterogeneous engines are harness-verified in CI against real MySQL 8.2 and SQL Server 2022
+containers. The last confidence step before trusting the path in anger is a rehearsal against a
+**real managed cloud source** (Azure SQL Database / Managed Instance, or Amazon RDS / Aurora
+MySQL) plus a real Postgres target, driven by the exact same engine + config the production run
+uses. That rehearsal is `test/heterogeneous/rehearse-cloud.ts`.
+
+**It is a rehearsal: it NEVER stops source writes and NEVER cuts over.** It runs
+`translate --apply` (no sign-off) -> `replicate` -> `watch` (health + catch-up + retention
+watchdog) -> `reconcile` -> `teardown`, then removes the Debezium container, leaving the source
+untouched. Config + secrets load exactly as the CLI loads them, so what you rehearse is what you
+run.
+
+```bash
+# config: $PGSHIFT_CONFIG (default ./migrate.config.yaml); secrets: $SOURCE_DB_URL / $TARGET_DB_URL
+# The Debezium container runs on YOUR machine and connects OUT to the cloud source, so the source
+# firewall must allow your egress IP and SOURCE_DB_URL must be the PUBLIC endpoint.
+bun run test/heterogeneous/rehearse-cloud.ts
+# PGSHIFT_REHEARSE_SKIP_TRANSLATE=1  -> you already applied the target schema; skip the draft/apply
+```
+
+Requires Docker locally. Exit 0 = the snapshot + streaming + reconcile were healthy against your
+cloud source; review the printed guided decisions before a real cutover.
+
+### Source prep before you rehearse
+
+**Azure SQL Database / Managed Instance (SQL Server engine):**
+- **Tier**: CDC needs any **vCore** tier, or DTU **S3+**. Basic / S0 / S1 / S2 cannot be a CDC
+  source. `doctor`'s `sqlserver.azure_tier` gate fails early on a blocked tier.
+- **CDC**: `EXEC sys.sp_cdc_enable_db` then `sys.sp_cdc_enable_table` on each table. On Azure SQL
+  DB an internal scheduler runs capture/cleanup (no SQL Server Agent); on MI/VM, Agent must run.
+- **Retention**: default CDC cleanup is 3 days. `watch`'s retention watchdog reads it from
+  `msdb.dbo.cdc_jobs` and aborts before a slow snapshot outruns it.
+- **Connectivity + TLS**: allow your egress IP in the server firewall; put `?encrypt=true` on
+  `SOURCE_DB_URL` (Azure requires TLS; the engine flips it on when it sees that flag).
+
+**Amazon RDS / Aurora MySQL (MySQL engine):**
+- **binlog**: `binlog_format=ROW`, `binlog_row_image=FULL`, `binlog_row_value_options` empty.
+- **Retention**: automated backups must be ON (RDS binlog requires them), then
+  `CALL mysql.rds_set_configuration('binlog retention hours', 168)`. `watch`'s retention
+  watchdog reads `@@binlog_expire_logs_seconds` and aborts before the snapshot outruns purge.
+- **Connectivity**: publicly-accessible instance (or run the rehearsal from within the VPC) with
+  a security-group rule for your egress IP.
+
+### Keep it cheap and safe
+
+- Rehearse against a **restored snapshot / clone** of production, or a small representative table
+  set (`reconcile.tables`), not the live primary -- the rehearsal reads + snapshots but the extra
+  CDC read load and the applied target schema are still real.
+- The rehearsal leaves the source untouched, but it DOES create the target schema (drop the
+  throwaway target afterwards).
+- To prove CDC (not just snapshot), INSERT/UPDATE a few rows on the source during the rehearsal
+  window and watch the counts converge before `reconcile`.
+
+---
+
 ## 9. The two honest caveats (printed loudly at run time)
 
 1. **Schema translation cannot be fully automated.** Item `mysql.schema_translation` is
