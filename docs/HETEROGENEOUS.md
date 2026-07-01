@@ -217,7 +217,11 @@ must enable CDC first (`sys.sp_cdc_enable_db` + per-table `sys.sp_cdc_enable_tab
 notes that shaped the `debezium` impl for this source:
 
 - **Azure SQL Database tier gate** — CDC needs a vCore tier (any) or DTU **S3+**; Basic/S0/S1/S2
-  can't be a source. `doctor`/`guide` must detect tier and fail early, not at connector start.
+  can't be a source. **DELIVERED**: the `sqlserver.azure_tier` source-prep item (fail-severity)
+  runs live in `doctor` and fails early on a blocked tier, before connector start. It reads
+  `DATABASEPROPERTYEX(DB_NAME(),'ServiceObjective')` (a built-in on every edition, so it no-ops
+  off Azure via the `EngineEdition <> 5` branch) rather than the Azure-only
+  `sys.database_service_objectives` view.
 - **Capture topology differs by flavour** — Azure SQL DB uses an internal CDC **scheduler**
   (no SQL Server Agent); MI and VM use Agent jobs. The connector config + health checks differ.
 - **CDC retention is the watchdog input** — default 3-day cleanup; a stalled migration past
