@@ -5,10 +5,15 @@ All notable changes to sbshift are documented here. Format loosely follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0, minor
 versions may carry behaviour changes.
 
-## [Unreleased]
+## [0.3.0] - 2026-07-03
 
 ### Changed
 
+- **Project renamed `pgshift` -> `sbshift`** across the binary, `package.json`
+  name/bin, docs, and the skill. The GitHub repo moved to
+  `github.com/erfianugrah/sbshift` (the old URL redirects). Runtime state/log
+  filenames follow suit (`.sbshift-sandbox.json`, `logs/sbshift-<cmd>-<ts>.log`).
+  No CLI-flag or config-schema changes beyond the command name itself.
 - Replication is now **direct-only, enforced in code** (was: doctor advisory).
   `replicate` hard-errors before `CREATE SUBSCRIPTION` if the effective
   replication CONNECTION (`SOURCE_REPLICATION_URL`, else `SOURCE_DB_URL`)
@@ -95,4 +100,5 @@ First tagged release. Two migration tracks, at two maturity levels.
   are load-bearing regardless of GA status.
 - Schema translation never auto-applies; cutover is gated on human sign-off.
 
+[0.3.0]: https://github.com/erfianugrah/sbshift/releases/tag/v0.3.0
 [0.2.0]: https://github.com/erfianugrah/sbshift/releases/tag/v0.2.0
