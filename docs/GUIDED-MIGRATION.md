@@ -1,11 +1,11 @@
 # Guided migration — design for heterogeneous → Postgres / Supabase
 
-> Status: design spec, no code yet. This document describes how pgshift extends from a
+> Status: design spec, no code yet. This document describes how sbshift extends from a
 > PG→PG logical-replication orchestrator into a **guided, knowledge-bearing migration
 > advisor** that subsumes the per-engine prep knowledge so the operator follows *one
 > checked tool* instead of a dozen vendor-doc tabs.
 
-For what pgshift does today (native PG→PG logical replication, the `doctor → watch →
+For what sbshift does today (native PG→PG logical replication, the `doctor → watch →
 reconcile → cutover` state machine), see [`RUNBOOK.md`](RUNBOOK.md) and
 [`MIGRATION-SCOPE.md`](MIGRATION-SCOPE.md). This spec is additive.
 
@@ -13,7 +13,7 @@ reconcile → cutover` state machine), see [`RUNBOOK.md`](RUNBOOK.md) and
 
 ## 1. The premise
 
-pgshift's value was never "it runs the migration." It is "it has already absorbed every
+sbshift's value was never "it runs the migration." It is "it has already absorbed every
 gotcha so you don't relearn them at 2am from twelve browser tabs." The replication engine
 is simply the part where that knowledge happens to be *executable*.
 
@@ -24,7 +24,7 @@ replica identity, and grants, then `replicate` just issues `CREATE SUBSCRIPTION`
 For **heterogeneous → Postgres** (MySQL, SQL Server, …) most of the prep knowledge is
 **not** executable by the tool — it lives in the source platform's config, requires the
 operator's console / reboot / credentials, or needs human judgment (schema-type choices).
-But it is still pgshift's job to **carry that knowledge, check it, and gate on it** — not
+But it is still sbshift's job to **carry that knowledge, check it, and gate on it** — not
 to hand you a link.
 
 The split, quantified roughly:
@@ -33,7 +33,7 @@ The split, quantified roughly:
   apply). That is **borrowed**, not built — see [`HETEROGENEOUS.md`](HETEROGENEOUS.md) (the
   Debezium-as-data-plane decision).
 - **~70%** is a **knowledge-and-guidance engine**: checked, sourced, freshness-synced,
-  fail-closed prep playbooks. That is the part nobody else ships and the part pgshift is
+  fail-closed prep playbooks. That is the part nobody else ships and the part sbshift is
   already shaped like (`doctor`'s `ok/warn/fail` + remediation, `cutover`'s
   `--confirm-writes-stopped` gate).
 
@@ -44,7 +44,7 @@ This spec is the design of that knowledge-and-guidance engine.
 ## 2. A "guide" is a checked step, not prose
 
 The failure mode of sparse online docs is that they are **inert**: they tell you to set
-`binlog_row_image=FULL` and trust that you did. pgshift turns every piece of prep knowledge
+`binlog_row_image=FULL` and trust that you did. sbshift turns every piece of prep knowledge
 into a **triplet**:
 
 1. **detect** — observe the current state (`SHOW VARIABLES LIKE 'binlog_row_image'`).
@@ -55,7 +55,7 @@ into a **triplet**:
    is — or, for steps the tool genuinely cannot observe, require an explicit operator
    acknowledgement that is recorded in the run log.
 
-The third leg is what no vendor doc gives you, and what pgshift already does in two places
+The third leg is what no vendor doc gives you, and what sbshift already does in two places
 today. Generalising it from a handful of hardcoded checks into a *knowledge base* of them
 is the whole move.
 
@@ -67,7 +67,7 @@ Every prep step is classified, and the class decides behaviour. The bar for drop
 `auto` toward `informed` is **safety / variability**, never "it's more work" — the
 knowledge stays inside the tool at every level.
 
-| Class | Meaning | pgshift behaviour |
+| Class | Meaning | sbshift behaviour |
 |---|---|---|
 | **auto** | safe, deterministic, idempotent, tool has the access | tool performs it, shows what it did, then `verify` |
 | **assisted** | tool can generate the exact artifact but must not run it (needs your console / reboot / privileged creds) | emits copy-pasteable command + a `verify` that confirms you ran it |
@@ -83,7 +83,7 @@ knowledge stays inside the tool at every level.
 
 ## 4. The unit of knowledge
 
-pgshift is zod-validated throughout, so a knowledge item is a validated record. A
+sbshift is zod-validated throughout, so a knowledge item is a validated record. A
 `Playbook` is an ordered list of them, selected by `(sourceEngine, target, phase)`.
 
 ```ts
@@ -119,12 +119,12 @@ is what unlocks both the guided-run UX and the upstream sync.
 
 ---
 
-## 5. Execution: `pgshift guide <source-engine>`
+## 5. Execution: `sbshift guide <source-engine>`
 
 A new command walks the selected playbook:
 
 ```
-pgshift guide mysql --target supabase [--phase source-prep] [--json]
+sbshift guide mysql --target supabase [--phase source-prep] [--json]
 ```
 
 For each item in phase order:
@@ -152,14 +152,14 @@ year alone: Neon inbound logical replication went GA, PlanetScale launched Postg
 Aurora added `aurora.enhanced_logical_replication`. So `provenance` is not decoration — it
 drives a maintenance loop.
 
-- **`pgshift kb drift`** — for each item, re-fetch `provenance.source`, hash the cited
+- **`sbshift kb drift`** — for each item, re-fetch `provenance.source`, hash the cited
   section, diff against `upstreamHash`. For PG-family + AWS items the source is
   **docs.erfi.io**, which is already a refreshed mirror (`aws-rds` 1388 files, `aws-aurora`
   988, `aws-dms` 291) updated by the existing "Update Docs" cron — so drift-check is a
   `docs_grep` against a path you control, not a fragile scrape of a vendor marketing site.
   For Debezium/MySQL items the source is the upstream URL (`debezium.io`, `dev.mysql.com`).
 
-- **`pgshift kb sync`** — surfaces drifted items for human review. It does **not**
+- **`sbshift kb sync`** — surfaces drifted items for human review. It does **not**
   auto-rewrite guidance from a doc diff (that is the same untrustworthy-automation trap as
   auto-applying a guessed schema). A human ratifies the change and bumps `lastSynced` +
   `upstreamHash`.
@@ -185,9 +185,9 @@ CDC-out-of-MySQL, which is exactly what a MySQL→PG guide must encode.
 **`mysql.user_grants`** — `severity: fail`, `klass: assisted`
 - **guidance**: create a dedicated CDC user with the minimum grants the connector needs:
   ```sql
-  CREATE USER 'pgshift'@'%' IDENTIFIED BY '<pw>';
+  CREATE USER 'sbshift'@'%' IDENTIFIED BY '<pw>';
   GRANT SELECT, RELOAD, SHOW DATABASES, REPLICATION SLAVE, REPLICATION CLIENT
-    ON *.* TO 'pgshift'@'%';
+    ON *.* TO 'sbshift'@'%';
   FLUSH PRIVILEGES;
   ```
 - **detect/verify**: `SHOW GRANTS FOR CURRENT_USER` includes `REPLICATION SLAVE` +
@@ -264,12 +264,12 @@ CDC-out-of-MySQL, which is exactly what a MySQL→PG guide must encode.
   Postgres `IDENTITY`/sequence to `MAX(pk)+1` before traffic flips. (Direct analogue of the
   existing PG sequence-resync in `cutover`.)
 - **verify**: `pg_sequences.last_value >= max(pk)` for every mapped table.
-- **provenance**: pgshift internal (mirrors PlanetScale's `ff-seq`/sequence-handling step).
+- **provenance**: sbshift internal (mirrors PlanetScale's `ff-seq`/sequence-handling step).
 
 ### Phase: target-prep (Supabase moat — reuse what exists)
 
 The Supabase non-data plane (`auth.users` FK seeding, `storage` schema, RLS, `config-sync`,
-advisor `verify`, the cutover write-stop gate) is **already automated by pgshift** and is
+advisor `verify`, the cutover write-stop gate) is **already automated by sbshift** and is
 engine-independent — it runs identically whether rows arrived from PG logical replication
 or a Debezium MySQL stream. AWS DMS streams your rows and leaves all of this to you; this is
 the differentiator. See [`MIGRATION-SCOPE.md`](MIGRATION-SCOPE.md).
@@ -366,7 +366,7 @@ sequence resync: set each Postgres `IDENTITY` to `MAX(pk)+1` before traffic flip
 
 ## 8. Appendix playbook: PG-family (drop-in, mostly `assisted`/`auto`)
 
-These are the same native logical-replication engine pgshift uses today — only the
+These are the same native logical-replication engine sbshift uses today — only the
 enablement guidance differs per provider. Provenance is docs.erfi.io.
 
 | id | provider | guidance (summary) | provenance |
@@ -375,7 +375,7 @@ enablement guidance differs per provider. Provenance is docs.erfi.io.
 | `aurora-pg.logical_replication` | Aurora PostgreSQL | same in a **cluster** parameter group | `/docs/aws-aurora/AuroraPostgreSQL.Replication.Logical.md` |
 | `aurora-pg.enhanced` | Aurora PostgreSQL | optional `aurora.enhanced_logical_replication=1` writes full column images without `REPLICA IDENTITY FULL`; **toggling invalidates all slots** (recreate); raises source IOPS | `/docs/aws-aurora/zero-etl.setting-up.md` |
 | `neon.enable` | Neon | enable logical replication per project — **irreversible**, **restarts all computes**; `max_wal_senders`/`max_replication_slots` pinned at 10 | `https://neon.com/docs/guides/logical-replication-neon` |
-| `neon.slot_reaping` | Neon | inactive slots auto-removed after ~40h; a paused migration loses its slot (ties into pgshift's WAL watchdog) | `https://neon.com/docs/guides/logical-replication-neon` |
+| `neon.slot_reaping` | Neon | inactive slots auto-removed after ~40h; a paused migration loses its slot (ties into sbshift's WAL watchdog) | `https://neon.com/docs/guides/logical-replication-neon` |
 | `neon.scale_to_zero` | Neon (as source) | a connected subscriber prevents scale-to-zero → ongoing compute cost | `https://neon.com/docs/guides/logical-replication-neon` |
 | `planetscale-pg.disk` | PlanetScale Postgres | target disk must be ≥150% of source size; params via Clusters → Parameters | `https://planetscale.com/docs/postgres/imports/postgres-migrate-walstream` |
 | `planetscale-pg.copy_data` | PlanetScale Postgres | after a manual schema import, `CREATE SUBSCRIPTION ... copy_data=false` or duplicate-key errors; resync sequences | `https://planetscale.com/docs/postgres/imports/postgres-migrate-walstream` |
@@ -401,11 +401,11 @@ untouched. Config + secrets load exactly as the CLI loads them, so what you rehe
 run.
 
 ```bash
-# config: $PGSHIFT_CONFIG (default ./migrate.config.yaml); secrets: $SOURCE_DB_URL / $TARGET_DB_URL
+# config: $SBSHIFT_CONFIG (default ./migrate.config.yaml); secrets: $SOURCE_DB_URL / $TARGET_DB_URL
 # The Debezium container runs on YOUR machine and connects OUT to the cloud source, so the source
 # firewall must allow your egress IP and SOURCE_DB_URL must be the PUBLIC endpoint.
 bun run test/heterogeneous/rehearse-cloud.ts
-# PGSHIFT_REHEARSE_SKIP_TRANSLATE=1  -> you already applied the target schema; skip the draft/apply
+# SBSHIFT_REHEARSE_SKIP_TRANSLATE=1  -> you already applied the target schema; skip the draft/apply
 ```
 
 Requires Docker locally. Exit 0 = the snapshot + streaming + reconcile were healthy against your
@@ -447,7 +447,7 @@ cloud source; review the printed guided decisions before a real cutover.
 
 1. **Schema translation cannot be fully automated.** Item `mysql.schema_translation` is
    `guided`, never `auto`: the tool drafts, the human ratifies, cutover gates on sign-off.
-2. **Cross-engine reconcile loses the byte-for-byte guarantee.** pgshift's PG→PG reconcile
+2. **Cross-engine reconcile loses the byte-for-byte guarantee.** sbshift's PG→PG reconcile
    hashes `row::text` with pinned GUCs — impossible across engines (MySQL trims trailing
    spaces, SQL Server pads CHAR, booleans/timestamps/floats render differently). Heterogeneous
    reconcile drops to **count + per-column aggregates** (min/max/sum/count/null-count). The
@@ -460,9 +460,9 @@ cloud source; review the printed guided decisions before a real cutover.
 
 1. Extract today's `doctor` checks into `Playbook` data items in `src/kb/` — mechanical
    refactor, no behaviour change. Valuable immediately, including for the PG-family work.
-2. Add `pgshift guide <source-engine>` — walks the playbook, runs detect → guide → verify,
+2. Add `sbshift guide <source-engine>` — walks the playbook, runs detect → guide → verify,
    gates per §5.
-3. Add `pgshift kb drift` / `pgshift kb sync` wired to docs.erfi.io + vendor URLs (§6).
+3. Add `sbshift kb drift` / `sbshift kb sync` wired to docs.erfi.io + vendor URLs (§6).
 4. The heterogeneous **data plane** (Debezium behind a `ReplicationEngine` interface) is
    orthogonal — see [`HETEROGENEOUS.md`](HETEROGENEOUS.md). The **knowledge plane** in this
    doc is the larger differentiator and ships independently.

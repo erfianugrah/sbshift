@@ -9,23 +9,23 @@
 
 ## 1. The asymmetry that makes this tractable
 
-pgshift only ever migrates **into Postgres** (plain PG or Supabase). DMS-style tools are
+sbshift only ever migrates **into Postgres** (plain PG or Supabase). DMS-style tools are
 priced and built as **any-to-any** — N source dialects × M target dialects, a quadratic
-type/DDL matrix. pgshift's target is always one dialect, which collapses the worst half:
+type/DDL matrix. sbshift's target is always one dialect, which collapses the worst half:
 
 - **One target type system, one target DDL dialect.** No "MySQL→Oracle" mappings — only
   "→ Postgres."
 - **The apply layer is off-the-shelf too.** When the sink is always Postgres, the Debezium
   **JDBC / Postgres sink connector** writes the rows; you don't hand-write the apply loop.
 
-So both *capture* and *apply* are wrap-not-build. What pgshift actually owns is the
+So both *capture* and *apply* are wrap-not-build. What sbshift actually owns is the
 orchestration + the schema-translation drafting + reconcile — its existing wheelhouse.
 
 ## 2. What native logical replication gave us for free (and now doesn't)
 
-PG→PG, one `CREATE SUBSCRIPTION ... copy_data=true` hands pgshift the entire data plane: a
+PG→PG, one `CREATE SUBSCRIPTION ... copy_data=true` hands sbshift the entire data plane: a
 consistent snapshot at an exact LSN, the CDC stream from that LSN with no gap/overlap, the
-apply loop (the target walreceiver writes rows — pgshift never touches one), type fidelity,
+apply loop (the target walreceiver writes rows — sbshift never touches one), type fidelity,
 and a deterministic `row::text` representation that makes byte-for-byte reconcile possible.
 
 Heterogeneous loses all of that. You re-implement the free half once per source engine — or
@@ -42,7 +42,7 @@ you wrap an engine that already did. The eight pieces:
 | 7 | Cross-engine reconcile | `row::text` byte-hash dies → count + per-column aggregates | **own (downgraded)** |
 | 8 | Engine-specific cutover gate | write-stop detection (`SHOW MASTER STATUS` / LSN poll), identity/auto-increment resync | **own (mirrors PG path)** |
 
-Items 4 and 7 are the only ones pgshift owns. Everything else is Debezium.
+Items 4 and 7 are the only ones sbshift owns. Everything else is Debezium.
 
 ## 3. The architecture: keep the control plane, plug the data plane
 
@@ -84,18 +84,18 @@ How the existing commands fork:
 ## 4. Why Debezium, not hand-rolled, and not DMS-only
 
 - **Not hand-rolled binlog/CDC parsers + a type matrix.** That is rebuilding Debezium/DMS:
-  years of other people's bug reports, and it dilutes pgshift into something unrecognizable.
+  years of other people's bug reports, and it dilutes sbshift into something unrecognizable.
 - **Not DMS-as-the-whole-tool.** AWS DMS does the data plane fine but knows nothing about the
   Supabase non-data plane (`auth.users` FK, storage, RLS, config-sync, advisor verify) and
-  has **no fail-closed cutover gate**. pgshift's orchestration *is* the differentiator DMS
-  lacks. Wrapping Debezium lets pgshift keep its control plane + Supabase muscle while
+  has **no fail-closed cutover gate**. sbshift's orchestration *is* the differentiator DMS
+  lacks. Wrapping Debezium lets sbshift keep its control plane + Supabase muscle while
   borrowing the hard CDC machinery.
 
 **Prior art validates the cutover gate.** Azure's own managed PostgreSQL Migration Service
-implements exactly pgshift's fail-closed model: it runs CDC, then enters a
+implements exactly sbshift's fail-closed model: it runs CDC, then enters a
 `Waiting for cutover trigger` state and instructs the operator to **stop writes to the
 source and wait for `latency` → 0** before a manual cutover. That a first-party cloud
-migration tool converges on the same write-stop-then-trigger gate is confirmation pgshift's
+migration tool converges on the same write-stop-then-trigger gate is confirmation sbshift's
 `cutover --confirm-writes-stopped` contract is the right shape, not an over-cautious quirk.
 Source: `learn.microsoft.com/en-us/azure/postgresql/migrate/migration-service`.
 
@@ -138,7 +138,7 @@ So **wait-for-GA is blocked** (3.6 GA unscheduled; CR1 jar only landed the day b
 pre-release**. The custom image layers the JDBC-sink jar onto the stock server image (finding #3),
 so the sink jar must MATCH the server-core version in the base image. On 2026-06-24 the base image
 topped out at Beta2 (no CR1 image), so both were pinned at Beta2. The pre-release risk is
-acceptable because finding #2 already makes pgshift's reconcile + fail-closed cutover load-bearing
+acceptable because finding #2 already makes sbshift's reconcile + fail-closed cutover load-bearing
 - the engine never trusts the sink's delivery guarantees, GA or not.
 
 **RE-PIN (2026-07-01): Beta2 -> `3.6.0.CR1`.** `quay.io/debezium/server:3.6.0.CR1` has since
@@ -167,10 +167,10 @@ The full `DebeziumEngine` lifecycle is built and proven end-to-end against real 
 
 Two CLI surfaces complete the guided path (MVP §5 item 3, DELIVERED 2026-06-24):
 
-- **`pgshift translate`** — drafts target Postgres DDL from the MySQL `information_schema`, writes
+- **`sbshift translate`** — drafts target Postgres DDL from the MySQL `information_schema`, writes
   `<out-dir>/target-schema.sql` + `target-schema.decisions.json` (never auto-applies), `--apply`
   to load it, `--sign-off` to ratify. `cutover` refuses to run until the draft is signed off.
-- **`pgshift doctor`** — for a heterogeneous source, runs the MySQL engine-prep playbook **live**:
+- **`sbshift doctor`** — for a heterogeneous source, runs the MySQL engine-prep playbook **live**:
   the items carrying a machine-checkable `assert` (grants, binlog ROW+FULL, GTID,
   `binlog_row_value_options`) are judged pass/warn/fail against the real server; retention is a
   live reading to weigh by hand; the schema gate points at `translate`. Target checks drop to
@@ -201,7 +201,7 @@ The SQL Server engine is implemented end-to-end and forks cleanly off `cfg.sourc
 - **schema translation** — `src/engine/sqlserver-schema-translate.ts` (the §7b long pole: full
   T-SQL matrix incl. fractional-second precision cap at 6, DATETIME→timestamp tz review, the
   ROWVERSION trap, IDENTITY + COMPUTED overlays, spatial/`sql_variant` design decisions). Wired
-  into `pgshift translate`.
+  into `sbshift translate`.
 - **engine lifecycle** — `DebeziumEngine` replicate/watch/reconcile/cutover/teardown are
   engine-aware: bracket `[schema].[table]` quoting + `LEN`, the sqlserver reconcile dialect, and
   a **CDC-`max_lsn` write-stop gate** (`sys.fn_cdc_get_max_lsn`) in place of the binlog position.

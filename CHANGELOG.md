@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to pgshift are documented here. Format loosely follows
+All notable changes to sbshift are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0, minor
 versions may carry behaviour changes.
@@ -24,7 +24,7 @@ versions may carry behaviour changes.
   is the **IPv4 add-on** (or running from an IPv6-capable host). The
   pooler-split via `SOURCE_REPLICATION_URL` is documented as a last-resort
   fallback, with the clarification that it does NOT route WAL through the pooler
-  (replication stays direct; the pooler only fronts pgshift's own
+  (replication stays direct; the pooler only fronts sbshift's own
   admin/seed/reconcile queries).
 
 ## [0.2.0] - 2026-07-01
@@ -53,13 +53,13 @@ First tagged release. Two migration tracks, at two maturity levels.
   (`DebeziumEngine`), forking on `cfg.source.engine`. Full lifecycle
   harness-verified end-to-end in CI against real MySQL 8.2 and SQL Server 2022
   (Developer, CDC) + Debezium 3.6.0.CR1 + Postgres 16.
-- `pgshift translate` drafts the source-DDL -> Postgres-DDL with a human
+- `sbshift translate` drafts the source-DDL -> Postgres-DDL with a human
   sign-off gate; cutover is blocked until the drafted schema is ratified.
 - Cross-engine `reconcile` (count + portable per-column aggregates) with the
   byte-exact-hash downgrade logged loudly.
 - Engine-aware write-stop cutover gate: MySQL binlog position / SQL Server CDC
   `max_lsn`.
-- `pgshift guide <engine>` + live `doctor` engine-prep playbooks (KB-driven,
+- `sbshift guide <engine>` + live `doctor` engine-prep playbooks (KB-driven,
   provenance-stamped, drift-checked).
 
 ### Added
@@ -91,8 +91,8 @@ First tagged release. Two migration tracks, at two maturity levels.
 - Heterogeneous reconcile is count + portable aggregates, not a byte-exact row
   hash (a length-preserving text edit is invisible to it).
 - Debezium is pinned to a pre-release; the JDBC sink gives weaker delivery
-  guarantees than Kafka Connect, so pgshift's reconcile + fail-closed cutover
+  guarantees than Kafka Connect, so sbshift's reconcile + fail-closed cutover
   are load-bearing regardless of GA status.
 - Schema translation never auto-applies; cutover is gated on human sign-off.
 
-[0.2.0]: https://github.com/erfianugrah/pgshift/releases/tag/v0.2.0
+[0.2.0]: https://github.com/erfianugrah/sbshift/releases/tag/v0.2.0

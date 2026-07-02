@@ -1,4 +1,4 @@
-# pgshift
+# sbshift
 
 Typed CLI orchestrator for **near-zero-downtime Postgres-to-Postgres migration** via native
 logical replication — for the large-database case where a plain dump/restore window is
@@ -18,7 +18,7 @@ reconciliation + WAL watchdog**.
 
 ## Migration paths & maturity
 
-pgshift has one control plane (`doctor → bootstrap → replicate → watch → reconcile → cutover →
+sbshift has one control plane (`doctor → bootstrap → replicate → watch → reconcile → cutover →
 verify → teardown`) behind a `ReplicationEngine` seam, with one engine per source database. Read
 this table first — **the maturity differs sharply by source**:
 
@@ -84,7 +84,7 @@ the connection note below. Runtime deps (via `bun install`): `commander`, `postg
 ## Getting started
 
 ```bash
-git clone https://github.com/erfianugrah/pgshift.git && cd pgshift
+git clone https://github.com/erfianugrah/sbshift.git && cd sbshift
 bun install                                           # commander, postgres, yaml, zod
 cp migrate.config.example.yaml migrate.config.yaml    # set source/target refs + tables
 cp .env.example .env                                  # DIRECT connection strings + PAT
@@ -126,18 +126,18 @@ silently shadow the sandbox and point a run at the wrong database. `--no-env-fil
 it. The direct host is **IPv6-only** unless the project has the
 [IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address).
 
-If the box you run `pgshift` from has no IPv6 route, the clean fix is one of:
+If the box you run `sbshift` from has no IPv6 route, the clean fix is one of:
 
 - **Enable the source's IPv4 add-on** - the direct host then resolves to IPv4 and everything
   reaches it directly. This is the recommended answer for anyone without IPv6.
-- **Run `pgshift` from an IPv6-capable host** - a VM in the target region is ideal.
+- **Run `sbshift` from an IPv6-capable host** - a VM in the target region is ideal.
 
 There is also a fallback for the narrow case where you have neither IPv6 nor the add-on: point
 `SOURCE_DB_URL`/`TARGET_DB_URL` at the IPv4 **session pooler** (port 5432) and set
 **`SOURCE_REPLICATION_URL`** to the source *direct* host. This does **not** route WAL through the
 pooler - replication is still direct: `SOURCE_REPLICATION_URL` becomes the subscription's
 `CONNECTION`, dialed by the target's walreceiver over Supabase's internal network, while the
-pooler only fronts pgshift's own admin/seed/reconcile queries. It works (`doctor` classifies each
+pooler only fronts sbshift's own admin/seed/reconcile queries. It works (`doctor` classifies each
 URL and validates the split), but prefer the IPv4 add-on - the split is a last resort, not the
 recommended path.
 
@@ -208,7 +208,7 @@ psql "$TARGET_DB_URL" --command 'SET session_replication_role = replica' --file 
 `docs/MIGRATION-SCOPE.md` — those stay manual by design.)
 
 > For the **complete, consolidated scope** — every artifact across Supabase's three official
-> migration guides + the Management-API surface, what carries it, and which pgshift command (or
+> migration guides + the Management-API surface, what carries it, and which sbshift command (or
 > manual step) owns it — see **[`docs/MIGRATION-SCOPE.md`](docs/MIGRATION-SCOPE.md)**. It is the
 > exhaustive answer to "what are the *some things* not stored in my database?".
 

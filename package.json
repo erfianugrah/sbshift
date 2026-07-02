@@ -1,12 +1,12 @@
 {
-  "name": "pgshift",
+  "name": "sbshift",
   "version": "0.2.0",
   "description": "Typed CLI orchestrator for cross-region Supabase project migration via logical replication.",
   "license": "MIT",
   "author": "Erfi Anugrah <erfi.anugrah@gmail.com>",
   "type": "module",
   "bin": {
-    "pgshift": "./src/cli.ts"
+    "sbshift": "./src/cli.ts"
   },
   "scripts": {
     "start": "bun run src/cli.ts",

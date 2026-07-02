@@ -84,38 +84,38 @@ function mockIO(
 describe("resolveRuntimeOpts", () => {
   test("defaults stage dir / volume / port / image from the topic prefix", () => {
     const rt = resolveRuntimeOpts({}, "dbz");
-    expect(rt.stageDir).toContain("pgshift-dbz-dbz");
+    expect(rt.stageDir).toContain("sbshift-dbz-dbz");
     expect(rt.configPath).toMatch(/application\.properties$/);
-    expect(rt.dataVolume).toBe("pgshift-dbz-dbz-data");
+    expect(rt.dataVolume).toBe("sbshift-dbz-dbz-data");
     expect(rt.metricsPort).toBe(8080);
     expect(rt.network).toBeUndefined();
-    expect(rt.image).toContain("pgshift/debezium-server:");
+    expect(rt.image).toContain("sbshift/debezium-server:");
   });
 
   test("env overrides stage dir / network / port / image / volume", () => {
     const rt = resolveRuntimeOpts(
       {
-        PGSHIFT_DBZ_STAGE_DIR: "/srv/stage",
-        PGSHIFT_DBZ_NETWORK: "pgshift-net",
-        PGSHIFT_DBZ_METRICS_PORT: "18080",
-        PGSHIFT_DBZ_IMAGE: "ghcr.io/me/dbz:test",
-        PGSHIFT_DBZ_DATA_VOLUME: "vol1",
+        SBSHIFT_DBZ_STAGE_DIR: "/srv/stage",
+        SBSHIFT_DBZ_NETWORK: "sbshift-net",
+        SBSHIFT_DBZ_METRICS_PORT: "18080",
+        SBSHIFT_DBZ_IMAGE: "ghcr.io/me/dbz:test",
+        SBSHIFT_DBZ_DATA_VOLUME: "vol1",
       },
       "dbz",
     );
     expect(rt.stageDir).toBe("/srv/stage");
     expect(rt.configPath).toBe("/srv/stage/application.properties");
-    expect(rt.network).toBe("pgshift-net");
+    expect(rt.network).toBe("sbshift-net");
     expect(rt.metricsPort).toBe(18080);
     expect(rt.image).toBe("ghcr.io/me/dbz:test");
     expect(rt.dataVolume).toBe("vol1");
   });
 
   test("rejects a non-positive metrics port", () => {
-    expect(() => resolveRuntimeOpts({ PGSHIFT_DBZ_METRICS_PORT: "0" }, "dbz")).toThrow(
+    expect(() => resolveRuntimeOpts({ SBSHIFT_DBZ_METRICS_PORT: "0" }, "dbz")).toThrow(
       /positive integer/,
     );
-    expect(() => resolveRuntimeOpts({ PGSHIFT_DBZ_METRICS_PORT: "x" }, "dbz")).toThrow(
+    expect(() => resolveRuntimeOpts({ SBSHIFT_DBZ_METRICS_PORT: "x" }, "dbz")).toThrow(
       /positive integer/,
     );
   });
@@ -137,7 +137,7 @@ describe("DebeziumEngine.replicate (mocked IO)", () => {
     const run = calls.exec.find((a) => a[1] === "run");
     expect(run).toBeDefined();
     expect(run).toContain("--name");
-    expect(run).toContain("pgshift-dbz-dbz");
+    expect(run).toContain("sbshift-dbz-dbz");
 
     expect(calls.health.length).toBeGreaterThanOrEqual(1);
   });
@@ -178,9 +178,9 @@ describe("DebeziumEngine.teardown (mocked IO)", () => {
     const { io, calls } = mockIO();
     await new DebeziumEngine(io).teardown(NODB, NODB, mysqlCfg());
     expect(calls.exec).toEqual([
-      debeziumStopArgv("pgshift-dbz-dbz"),
-      debeziumRmArgv("pgshift-dbz-dbz"),
-      debeziumVolumeRmArgv("pgshift-dbz-dbz-data"),
+      debeziumStopArgv("sbshift-dbz-dbz"),
+      debeziumRmArgv("sbshift-dbz-dbz"),
+      debeziumVolumeRmArgv("sbshift-dbz-dbz-data"),
     ]);
   });
 
@@ -204,8 +204,8 @@ describe("DebeziumEngine.teardown (mocked IO)", () => {
 
 describe("run-spec naming helpers", () => {
   test("container + volume names derive from the topic prefix", () => {
-    expect(debeziumContainerName("dbz")).toBe("pgshift-dbz-dbz");
-    expect(debeziumDataVolume("dbz")).toBe("pgshift-dbz-dbz-data");
+    expect(debeziumContainerName("dbz")).toBe("sbshift-dbz-dbz");
+    expect(debeziumDataVolume("dbz")).toBe("sbshift-dbz-dbz-data");
   });
 });
 
@@ -289,7 +289,7 @@ describe("DebeziumEngine.reconcile (mock source + fake target)", () => {
 
 /** A throwaway out-dir holding a SIGNED-OFF schema manifest so cutover's gate passes. */
 function signedSchemaDir(cfg: ReturnType<typeof mysqlCfg>): string {
-  const outDir = mkdtempSync(join(tmpdir(), "pgshift-cutover-schema-"));
+  const outDir = mkdtempSync(join(tmpdir(), "sbshift-cutover-schema-"));
   const m = buildManifest(cfg, { sql: "CREATE TABLE ...;", decisions: [] });
   writeFileSync(schemaArtifactPaths(outDir).manifest, `${JSON.stringify(m, null, 2)}\n`);
   signOffSchema(outDir);
@@ -332,11 +332,11 @@ describe("DebeziumEngine.cutover (mock source + fake target)", () => {
     const { io, calls } = mockIO();
     await new DebeziumEngine(io, async () => my.conn).cutover(NODB, target, cfg, { outDir });
     // stopped the container at the end (the drop-subscription analogue)
-    expect(calls.exec).toContainEqual(debeziumStopArgv("pgshift-dbz-dbz"));
+    expect(calls.exec).toContainEqual(debeziumStopArgv("sbshift-dbz-dbz"));
   });
 
   test("refuses to cutover when the schema draft is not signed off (the gate)", async () => {
-    const unsigned = mkdtempSync(join(tmpdir(), "pgshift-cutover-unsigned-"));
+    const unsigned = mkdtempSync(join(tmpdir(), "sbshift-cutover-unsigned-"));
     const m = buildManifest(cfg, { sql: "x", decisions: [] });
     writeFileSync(schemaArtifactPaths(unsigned).manifest, `${JSON.stringify(m, null, 2)}\n`);
     const my = fakeMySql(() => [{ File: "bin.000001", Position: 1 }]);
@@ -499,7 +499,7 @@ describe("DebeziumEngine — SQL Server source forks", () => {
     await new DebeziumEngine(io, undefined, async () => ss.conn).cutover(NODB, target, cfg, {
       outDir,
     });
-    expect(calls.exec).toContainEqual(debeziumStopArgv("pgshift-dbz-dbz"));
+    expect(calls.exec).toContainEqual(debeziumStopArgv("sbshift-dbz-dbz"));
   });
 
   if (origUrl === undefined) delete process.env.SOURCE_DB_URL;

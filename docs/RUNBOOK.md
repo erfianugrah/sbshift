@@ -54,7 +54,7 @@ The direct host is **IPv6-only** unless the project has the IPv4 add-on. **If th
 from has no IPv6 route**, `replicate` / `watch` / `reconcile` cannot connect to the direct
 host from there. Pick one before you go further:
 
-- **Option A (recommended, $0):** run `pgshift` from an IPv6-capable host — e.g. a small
+- **Option A (recommended, $0):** run `sbshift` from an IPv6-capable host — e.g. a small
   VM in the target region. Clone the repo, `bun install`, copy `migrate.config.yaml` + `.env`.
 - **Option B (small cost):** enable the [IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address)
   on the source (and target) for the migration window, then run from your box. Remove it after.
@@ -64,7 +64,7 @@ host from there. Pick one before you go further:
   pooler - the subscription's CONNECTION is `SOURCE_REPLICATION_URL`, dialed by the target's
   walreceiver over the provider's internal network, so replication stays direct. `doctor`
   validates the split, and `replicate` hard-errors if the replication CONNECTION is ever a pooler.
-  Prefer A or B - the pooler adds a hop for pgshift's own queries with no upside.
+  Prefer A or B - the pooler adds a hop for sbshift's own queries with no upside.
 
 The read-only prep in steps 2–3 and the dump/restore in step 6 work via the **pooler**
 regardless of which option you choose.
@@ -290,7 +290,7 @@ observability stack owns the **app-tier** gates (right). Abort if either trips.
 - `reconcile` reports any mismatch → do **not** complete cutover; investigate.
 - App-tier: sustained 5xx > Y for N min, or DB p95 > X for N min, after repoint → roll back (§12).
 
-Keep one dashboard view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `pgshift watch`/`status` output (or its `--log-file`).
+Keep one dashboard view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `sbshift watch`/`status` output (or its `--log-file`).
 
 ```bash
 # 9a. STOP application writes to the SOURCE (put the app in read-only / take it down).
@@ -523,6 +523,6 @@ project becomes a cold standby.
 
 All commands take `-c <path>` for an alternate config (default `migrate.config.yaml`), and
 `--env-file <path>` to load secrets from a specific file (default `.env` if present). The env
-file is **authoritative over inherited shell variables** — pgshift warns when it overrides a
+file is **authoritative over inherited shell variables** — sbshift warns when it overrides a
 conflicting one, so a stale `SOURCE_DB_URL` exported in your shell can never silently point a
 run at the wrong database. `--no-env-file` uses the inherited environment as-is.

@@ -15,7 +15,7 @@ import {
   translate,
 } from "../src/steps/translate.ts";
 
-const tmp = () => mkdtempSync(join(tmpdir(), "pgshift-translate-test-"));
+const tmp = () => mkdtempSync(join(tmpdir(), "sbshift-translate-test-"));
 
 const mysqlCfg = (tables: string[]): Config =>
   ConfigSchema.parse({

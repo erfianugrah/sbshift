@@ -7,7 +7,7 @@
  *   - finding #5: NEVER emit a `${...}` placeholder — Quarkus/SmallRye pre-expands it as its own
  *     config-expression syntax and NPEs. Topic→table naming is done with a RegexRouter SMT whose
  *     `$1` replacement has no braces. `assertNoConfigExpression` is a hard guard.
- *   - finding #6: `schema.evolution=none` in production — pgshift pre-creates the target from the
+ *   - finding #6: `schema.evolution=none` in production — sbshift pre-creates the target from the
  *     `guided` schema-translation draft (GUIDED-MIGRATION.md §7); Debezium's `basic` auto-DDL
  *     would land the wrong types. `basic` is allowed only for the spike/smoke harness.
  *   - finding #7: no `ExtractNewRecordState` SMT — the JDBC sink ingests native change events.
@@ -70,7 +70,7 @@ export interface DebeziumPlan {
   source: DebeziumSource;
   target: DebeziumTarget;
   /**
-   * `none` (production): pgshift pre-creates the target schema from the guided draft.
+   * `none` (production): sbshift pre-creates the target schema from the guided draft.
    * `basic`: Debezium auto-creates/adds columns — spike/smoke only (finding #6).
    */
   schemaEvolution: "none" | "basic";
@@ -114,7 +114,7 @@ function parseDbUrl(
 }
 
 /**
- * Build a {@link DebeziumPlan} from real pgshift `Config` + `Secrets` — the bridge between the
+ * Build a {@link DebeziumPlan} from real sbshift `Config` + `Secrets` — the bridge between the
  * control-plane config and the spike-proven renderer. Source connection comes from
  * `SOURCE_DB_URL` (a `mysql://` URL); only the structural bits (`serverId`, `databases`) live in
  * `config.source`. The JDBC sink target comes from `TARGET_DB_URL` (a `postgresql://` URL),
@@ -198,7 +198,7 @@ export function renderDebeziumServerConfig(plan: DebeziumPlan): string {
   const { sourceLines, routeRegex } = renderSourceSection(source, topicPrefix, dataDir);
 
   const lines = [
-    `# Rendered by pgshift — Debezium Server ${source.flavour} → Postgres (no Kafka). DO NOT log: contains secrets.`,
+    `# Rendered by sbshift — Debezium Server ${source.flavour} → Postgres (no Kafka). DO NOT log: contains secrets.`,
     "",
     ...sourceLines,
     "",

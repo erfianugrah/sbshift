@@ -40,11 +40,11 @@ const { version } = JSON.parse(
 
 const program = new Command();
 program
-  .name("pgshift")
+  .name("sbshift")
   .version(version, "-V, --version")
   .description(
     "Near-zero-downtime Postgres-to-Postgres migration orchestrator (logical replication).\n" +
-      "Generic PG15+; Supabase-aware. Step-by-step runbook: docs/RUNBOOK.md. Start with `pgshift doctor`.",
+      "Generic PG15+; Supabase-aware. Step-by-step runbook: docs/RUNBOOK.md. Start with `sbshift doctor`.",
   )
   .option("-c, --config <path>", "path to migrate.config.yaml", "migrate.config.yaml")
   .option(
@@ -54,7 +54,7 @@ program
   .option("--no-env-file", "do not load any secrets file; use the inherited environment as-is")
   .option(
     "--log-file <path>",
-    "mirror all logs to this append-only file (default: logs/pgshift-<command>-<ts>.log)",
+    "mirror all logs to this append-only file (default: logs/sbshift-<command>-<ts>.log)",
   )
   .option("--no-log-file", "disable the durable log file (terminal only)");
 
@@ -85,7 +85,7 @@ program.hook("preAction", (thisCommand, actionCommand) => {
   if (opts.logFile === false) return; // --no-log-file
   const cmd = actionCommand.name();
   const ts = new Date().toISOString().replace(/[:.]/g, "-");
-  const path = typeof opts.logFile === "string" ? opts.logFile : `logs/pgshift-${cmd}-${ts}.log`;
+  const path = typeof opts.logFile === "string" ? opts.logFile : `logs/sbshift-${cmd}-${ts}.log`;
   const resolved = log.toFile(path);
   log.detail(`logging to ${resolved}`);
 });

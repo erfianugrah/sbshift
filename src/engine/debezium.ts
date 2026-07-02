@@ -149,19 +149,19 @@ export function resolveRuntimeOpts(
   env: Record<string, string | undefined>,
   topicPrefix: string,
 ): DebeziumRuntimeOpts {
-  const stageDir = env.PGSHIFT_DBZ_STAGE_DIR ?? join(tmpdir(), `pgshift-dbz-${topicPrefix}`);
-  const portRaw = env.PGSHIFT_DBZ_METRICS_PORT;
+  const stageDir = env.SBSHIFT_DBZ_STAGE_DIR ?? join(tmpdir(), `sbshift-dbz-${topicPrefix}`);
+  const portRaw = env.SBSHIFT_DBZ_METRICS_PORT;
   const metricsPort = portRaw ? Number(portRaw) : 8080;
   if (!Number.isInteger(metricsPort) || metricsPort <= 0) {
-    throw new Error(`PGSHIFT_DBZ_METRICS_PORT must be a positive integer, got '${portRaw}'`);
+    throw new Error(`SBSHIFT_DBZ_METRICS_PORT must be a positive integer, got '${portRaw}'`);
   }
   return {
     stageDir,
     configPath: join(stageDir, "application.properties"),
-    dataVolume: env.PGSHIFT_DBZ_DATA_VOLUME ?? debeziumDataVolume(topicPrefix),
+    dataVolume: env.SBSHIFT_DBZ_DATA_VOLUME ?? debeziumDataVolume(topicPrefix),
     metricsPort,
-    network: env.PGSHIFT_DBZ_NETWORK || undefined,
-    image: env.PGSHIFT_DBZ_IMAGE ?? DEBEZIUM_IMAGE,
+    network: env.SBSHIFT_DBZ_NETWORK || undefined,
+    image: env.SBSHIFT_DBZ_IMAGE ?? DEBEZIUM_IMAGE,
   };
 }
 
@@ -456,7 +456,7 @@ export class DebeziumEngine implements ReplicationEngine {
    *
    * Before any of that it enforces the translated-schema sign-off gate (GUIDED-MIGRATION.md §7):
    * cutover refuses to flip traffic onto a schema the operator never reviewed + ratified via
-   * `pgshift translate --sign-off`.
+   * `sbshift translate --sign-off`.
    */
   async cutover(_source: Db, target: Db, cfg: Config, opts: CutoverOpts): Promise<void> {
     const engine = heterogeneousEngine(cfg);

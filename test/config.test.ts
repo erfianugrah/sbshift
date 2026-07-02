@@ -159,18 +159,18 @@ describe("parseEnvFile", () => {
 
 describe("applyEnvFile", () => {
   test("overrides inherited env and reports only the keys whose value DIFFERED", () => {
-    const dir = mkdtempSync(join(tmpdir(), "pgshift-env-"));
+    const dir = mkdtempSync(join(tmpdir(), "sbshift-env-"));
     const path = join(dir, ".env");
-    writeFileSync(path, "PGSHIFT_TEST_A=fromfile\nPGSHIFT_TEST_B=same\nPGSHIFT_TEST_C=new\n");
-    process.env.PGSHIFT_TEST_A = "fromshell"; // conflict (differs)
-    process.env.PGSHIFT_TEST_B = "same"; // present but identical -> not a conflict
-    delete process.env.PGSHIFT_TEST_C; // absent -> not a conflict
+    writeFileSync(path, "SBSHIFT_TEST_A=fromfile\nSBSHIFT_TEST_B=same\nSBSHIFT_TEST_C=new\n");
+    process.env.SBSHIFT_TEST_A = "fromshell"; // conflict (differs)
+    process.env.SBSHIFT_TEST_B = "same"; // present but identical -> not a conflict
+    delete process.env.SBSHIFT_TEST_C; // absent -> not a conflict
 
     const { applied, conflicts } = applyEnvFile(path);
 
-    expect(applied.sort()).toEqual(["PGSHIFT_TEST_A", "PGSHIFT_TEST_B", "PGSHIFT_TEST_C"]);
-    expect(conflicts).toEqual(["PGSHIFT_TEST_A"]);
-    expect(process.env.PGSHIFT_TEST_A).toBe("fromfile"); // file won
-    for (const k of ["PGSHIFT_TEST_A", "PGSHIFT_TEST_B", "PGSHIFT_TEST_C"]) delete process.env[k];
+    expect(applied.sort()).toEqual(["SBSHIFT_TEST_A", "SBSHIFT_TEST_B", "SBSHIFT_TEST_C"]);
+    expect(conflicts).toEqual(["SBSHIFT_TEST_A"]);
+    expect(process.env.SBSHIFT_TEST_A).toBe("fromfile"); // file won
+    for (const k of ["SBSHIFT_TEST_A", "SBSHIFT_TEST_B", "SBSHIFT_TEST_C"]) delete process.env[k];
   });
 });

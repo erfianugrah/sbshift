@@ -155,7 +155,7 @@ export async function doctor(
       ok(
         `SOURCE_DB_URL is a pooler (admin/seed/reconcile), but SOURCE_REPLICATION_URL is the ` +
           `direct host (ref ${repl.ref}) — the subscription will stream from there. Correct split ` +
-          `for running pgshift from a host without IPv6 to the direct host.`,
+          `for running sbshift from a host without IPv6 to the direct host.`,
       );
     else if (repl)
       fail(
@@ -272,7 +272,7 @@ export function providerHint(provider: PgProvider, role: "source" | "target"): s
 function reachHint(error: string | undefined, c: ReturnType<typeof classifyConn>): string {
   const e = error ?? "unknown error";
   if (/network is unreachable|enetunreach|ehostunreach/i.test(e) && c.isSupabaseDirect)
-    return "host resolves IPv6-only and there's no IPv6 route from here. Run pgshift from an IPv6-capable host, or enable the source's IPv4 add-on.";
+    return "host resolves IPv6-only and there's no IPv6 route from here. Run sbshift from an IPv6-capable host, or enable the source's IPv4 add-on.";
   return e;
 }
 
@@ -439,7 +439,7 @@ async function targetChecks(
     } else {
       s.warn(`target missing source extensions (enable before schema load): ${missing.join(", ")}`);
       for (const stmt of extensionStatements(missing)) log.detail(`fix: ${stmt}`);
-      log.detail("or run: pgshift bootstrap --confirm (enables these + restores roles + schema)");
+      log.detail("or run: sbshift bootstrap --confirm (enables these + restores roles + schema)");
     }
   }
 
@@ -612,7 +612,7 @@ async function liveSourcePrepChecks(
         log.detail(
           `${item.title}: ${
             item.klass === "guided"
-              ? "run `pgshift translate` (cutover is gated on sign-off)"
+              ? "run `sbshift translate` (cutover is gated on sign-off)"
               : "handled automatically at the relevant phase"
           }`,
         );
@@ -634,7 +634,7 @@ async function heterogeneousTargetChecks(target: Db, cfg: Config, s: Sink): Prom
   const num = Number(v?.server_version_num ?? 0);
   num >= 150_000
     ? s.ok(`target PG ${num} (≥15)`)
-    : s.warn(`target PG ${num} — pgshift targets PG15+`);
+    : s.warn(`target PG ${num} — sbshift targets PG15+`);
 
   const tq = (sql: string, p?: readonly unknown[]) => target.unsafe(sql, (p ?? []) as never[]);
   const schemaLoaded = check("target.schema_loaded");
@@ -644,7 +644,7 @@ async function heterogeneousTargetChecks(target: Db, cfg: Config, s: Sink): Prom
     row
       ? s.ok(`target table public.${table} exists (translated schema loaded)`)
       : s.fail(
-          `target table public.${table} MISSING — run \`pgshift translate --apply\` to load the ` +
+          `target table public.${table} MISSING — run \`sbshift translate --apply\` to load the ` +
             "translated schema (Debezium does not create tables)",
         );
   }
