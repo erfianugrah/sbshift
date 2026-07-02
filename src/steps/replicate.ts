@@ -1,6 +1,6 @@
 import type { Config, Secrets } from "../config.ts";
 import type { Db } from "../db.ts";
-import { qi, sourceConnUrl } from "../db.ts";
+import { assertDirectReplicationConn, qi, sourceConnUrl } from "../db.ts";
 import { log } from "../log.ts";
 
 // H-4: quote every identifier that comes from user config so names with hyphens,
@@ -80,7 +80,9 @@ export async function replicate(
   // C-2: use the URL directly — PostgreSQL's CREATE SUBSCRIPTION CONNECTION accepts URL format,
   // avoiding the libpq keyword=value quoting problem (unquoted passwords with spaces break
   // tokenisation before any escaping layer can fix it). Percent-encoding in the URL is clean.
-  const conn = sourceConnUrl(secrets).replaceAll("'", "''");
+  const replUrl = sourceConnUrl(secrets);
+  assertDirectReplicationConn(replUrl); // hard-stop: never issue a subscription over a pooler
+  const conn = replUrl.replaceAll("'", "''");
   await target.unsafe(
     `CREATE SUBSCRIPTION ${qi(subscription)}
        CONNECTION '${conn}'

@@ -58,10 +58,13 @@ host from there. Pick one before you go further:
   VM in the target region. Clone the repo, `bun install`, copy `migrate.config.yaml` + `.env`.
 - **Option B (small cost):** enable the [IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address)
   on the source (and target) for the migration window, then run from your box. Remove it after.
-- **Option C (split):** keep `SOURCE_DB_URL`/`TARGET_DB_URL` on the IPv4 **session pooler**
-  for admin/dump/reconcile and set **`SOURCE_REPLICATION_URL`** to the source *direct* host —
-  the subscription is dialed by the target's walreceiver over the provider's internal network.
-  `doctor` validates the split.
+- **Option C (split - last resort):** only if you can do neither A nor B. Keep
+  `SOURCE_DB_URL`/`TARGET_DB_URL` on the IPv4 **session pooler** for admin/dump/reconcile and set
+  **`SOURCE_REPLICATION_URL`** to the source *direct* host. This does NOT route WAL through the
+  pooler - the subscription's CONNECTION is `SOURCE_REPLICATION_URL`, dialed by the target's
+  walreceiver over the provider's internal network, so replication stays direct. `doctor`
+  validates the split, and `replicate` hard-errors if the replication CONNECTION is ever a pooler.
+  Prefer A or B - the pooler adds a hop for pgshift's own queries with no upside.
 
 The read-only prep in steps 2–3 and the dump/restore in step 6 work via the **pooler**
 regardless of which option you choose.
@@ -79,8 +82,12 @@ cp .env.example .env                                  # set SOURCE_DB_URL (and t
 bun start doctor --source-only
 ```
 
-Expected: `READY (with warnings)`. Typical warnings are the `auth.users` cross-schema FK
-(addressed in step 6) and a "pooler endpoint" note (expected until you run from a direct host).
+Expected: `READY (with warnings)` when `SOURCE_DB_URL` is the **direct** host - the typical
+warning is the `auth.users` cross-schema FK (addressed in step 6). If you're on a non-IPv6 box
+and set `SOURCE_DB_URL` to the pooler, set **`SOURCE_REPLICATION_URL`** to the source *direct*
+host now (Option C) so `doctor` reports the split as correct. A pooler `SOURCE_DB_URL` with no
+`SOURCE_REPLICATION_URL` is a hard **FAIL** (`NOT READY`): the pooler can't stream WAL, so that
+config could never replicate.
 
 ---
 

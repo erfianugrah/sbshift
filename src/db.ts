@@ -185,3 +185,21 @@ export function classifyConn(url: string): ConnInfo {
 export function sourceConnUrl(secrets: Secrets): string {
   return secrets.SOURCE_REPLICATION_URL ?? secrets.SOURCE_DB_URL;
 }
+
+/**
+ * Enforce the direct-only replication invariant. The subscription CONNECTION must be a
+ * DIRECT host - a Supavisor pooler cannot stream logical replication WAL, so a subscription
+ * pointed at one silently never syncs. Throws with actionable guidance. Called by replicate()
+ * right before CREATE SUBSCRIPTION so the check fires regardless of whether the operator ran
+ * doctor first; kept a pure named export so it's unit-testable without a live connection.
+ */
+export function assertDirectReplicationConn(url: string): void {
+  const c = classifyConn(url);
+  if (c.isPooler)
+    throw new Error(
+      `replication CONNECTION is a Supavisor pooler (${c.host}) - the pooler cannot stream ` +
+        `logical replication WAL, so the subscription would never sync. Point replication at a ` +
+        `DIRECT host: set SOURCE_REPLICATION_URL to db.<ref>.supabase.co, or enable the source's ` +
+        `IPv4 add-on and use the direct host as SOURCE_DB_URL.`,
+    );
+}

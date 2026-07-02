@@ -119,21 +119,27 @@ bun start sandbox down                # delete both projects + remove the genera
 overrides a conflicting variable), so a `SOURCE_DB_URL` left exported in your shell can't
 silently shadow the sandbox and point a run at the wrong database. `--no-env-file` opts out.
 
-### Connection: direct vs pooler (the IPv6 trap)
+### Connection: use direct connections (the IPv6 trap)
 
-Both ends need a **direct** connection (`db.<ref>.supabase.co:5432`) — the pooler
-(`*.pooler.supabase.com`) **cannot stream logical replication**. The direct host is
-**IPv6-only** unless the project has the
+**Use a direct connection at both ends** (`db.<ref>.supabase.co:5432`). The pooler
+(`*.pooler.supabase.com`) **cannot stream logical replication** - never point replication at
+it. The direct host is **IPv6-only** unless the project has the
 [IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address).
 
-If the box you run `pgshift` from has no IPv6 route, you have two options: run it from a host
-that does (a VM in the target region is ideal), or **split the connection** — point
-`SOURCE_DB_URL`/`TARGET_DB_URL` at the IPv4 **session pooler** (port 5432) for
-admin/seed/reconcile and set **`SOURCE_REPLICATION_URL`** to the source *direct* host. The
-subscription then streams from there (the target's walreceiver reaches it over Supabase's
-internal network) while the pooler can't stream WAL. `doctor` classifies each URL and validates
-the split. *Verified live: the full pipeline — including `CREATE SUBSCRIPTION` through the
-session pooler — ran end-to-end from a non-IPv6 box against a real cross-region Supabase pair.*
+If the box you run `pgshift` from has no IPv6 route, the clean fix is one of:
+
+- **Enable the source's IPv4 add-on** - the direct host then resolves to IPv4 and everything
+  reaches it directly. This is the recommended answer for anyone without IPv6.
+- **Run `pgshift` from an IPv6-capable host** - a VM in the target region is ideal.
+
+There is also a fallback for the narrow case where you have neither IPv6 nor the add-on: point
+`SOURCE_DB_URL`/`TARGET_DB_URL` at the IPv4 **session pooler** (port 5432) and set
+**`SOURCE_REPLICATION_URL`** to the source *direct* host. This does **not** route WAL through the
+pooler - replication is still direct: `SOURCE_REPLICATION_URL` becomes the subscription's
+`CONNECTION`, dialed by the target's walreceiver over Supabase's internal network, while the
+pooler only fronts pgshift's own admin/seed/reconcile queries. It works (`doctor` classifies each
+URL and validates the split), but prefer the IPv4 add-on - the split is a last resort, not the
+recommended path.
 
 ## What this tool does NOT replicate — do this FIRST
 

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { isTransient, sourceConnUrl } from "../src/db.ts";
+import { assertDirectReplicationConn, isTransient, sourceConnUrl } from "../src/db.ts";
 
 // C-2: sourceConnString (libpq keyword=value) was replaced by sourceConnUrl which
 // returns the raw URL for CREATE SUBSCRIPTION CONNECTION — no quoting needed
@@ -30,6 +30,36 @@ describe("sourceConnUrl", () => {
     // Percent-encoded form is safe for SQL string embedding — no raw ' or spaces
     expect(url).toContain("p%40ss%3Aword");
     expect(url).not.toContain("p@ss:word");
+  });
+});
+
+describe("assertDirectReplicationConn - direct-only replication invariant", () => {
+  test("throws on a session-pooler CONNECTION (cannot stream WAL)", () => {
+    expect(() =>
+      assertDirectReplicationConn(
+        "postgresql://postgres.ref:pw@aws-1-eu-central-1.pooler.supabase.com:5432/postgres",
+      ),
+    ).toThrow(/pooler cannot stream|Supavisor pooler/i);
+  });
+
+  test("throws on a transaction-pooler CONNECTION too", () => {
+    expect(() =>
+      assertDirectReplicationConn(
+        "postgresql://postgres.ref:pw@aws-1-eu-central-1.pooler.supabase.com:6543/postgres",
+      ),
+    ).toThrow(/pooler/i);
+  });
+
+  test("passes for a direct Supabase host", () => {
+    expect(() =>
+      assertDirectReplicationConn("postgresql://postgres:pw@db.abcdef.supabase.co:5432/postgres"),
+    ).not.toThrow();
+  });
+
+  test("passes for a plain self-hosted host (not a pooler)", () => {
+    expect(() =>
+      assertDirectReplicationConn("postgresql://u:p@source-host:5432/postgres"),
+    ).not.toThrow();
   });
 });
 

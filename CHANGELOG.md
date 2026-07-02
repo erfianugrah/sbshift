@@ -5,6 +5,28 @@ All notable changes to pgshift are documented here. Format loosely follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0, minor
 versions may carry behaviour changes.
 
+## [Unreleased]
+
+### Changed
+
+- Replication is now **direct-only, enforced in code** (was: doctor advisory).
+  `replicate` hard-errors before `CREATE SUBSCRIPTION` if the effective
+  replication CONNECTION (`SOURCE_REPLICATION_URL`, else `SOURCE_DB_URL`)
+  resolves to a Supavisor pooler host - the pooler cannot stream logical
+  replication WAL, so a subscription pointed at one silently never syncs. New
+  pure guard `assertDirectReplicationConn()` in `src/db.ts` (unit-tested).
+- `doctor` now **FAILs** (was: warned) when `SOURCE_DB_URL` is a pooler and
+  `SOURCE_REPLICATION_URL` is unset - that config would send `CREATE
+  SUBSCRIPTION` to the pooler. The failure message points at both fixes: set
+  `SOURCE_REPLICATION_URL` to the direct host, or enable the source's IPv4
+  add-on and use the direct host as `SOURCE_DB_URL`.
+- Docs (README + skill) reframed: the recommended answer for a non-IPv6 runner
+  is the **IPv4 add-on** (or running from an IPv6-capable host). The
+  pooler-split via `SOURCE_REPLICATION_URL` is documented as a last-resort
+  fallback, with the clarification that it does NOT route WAL through the pooler
+  (replication stays direct; the pooler only fronts pgshift's own
+  admin/seed/reconcile queries).
+
 ## [0.2.0] - 2026-07-01
 
 First tagged release. Two migration tracks, at two maturity levels.

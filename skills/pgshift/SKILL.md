@@ -82,16 +82,20 @@ Supabase-only commands layered on top: `config-sync` (Management-API config copy
 
 ## High-value traps (the reason this skill exists)
 
-**IPv6 / direct-vs-pooler — the most common topology trap.**
+**IPv6 / direct connections - the most common topology trap.**
 Logical replication needs a **direct** connection (`db.<ref>.supabase.co:5432`);
-the **pooler cannot stream WAL**. Supabase direct hosts are **IPv6-only** (unless
-the IPv4 add-on is enabled). If pgshift runs from a non-IPv6 box: point
-`SOURCE_DB_URL`/`TARGET_DB_URL` at the **IPv4 session pooler** (port 5432) for
-admin/seed/reconcile, and set **`SOURCE_REPLICATION_URL`** to the source *direct*
-host — the subscription's CONNECTION is dialed by the **target's walreceiver over
-Supabase's internal network**, not from your box. `CREATE SUBSCRIPTION` itself
-succeeds through the session pooler (doctor's warning there is conservative).
-*Verified live end-to-end from a non-IPv6 box against a real cross-region pair.*
+the **pooler cannot stream WAL** - never point replication at it. Supabase direct
+hosts are **IPv6-only** (unless the IPv4 add-on is enabled). If pgshift runs from a
+non-IPv6 box, the clean fix is to **enable the source's IPv4 add-on** (direct host
+then resolves to IPv4 - recommended for anyone without IPv6) or **run from an
+IPv6-capable host** (a VM in the target region).
+Fallback for the narrow no-IPv6-and-no-add-on case: point
+`SOURCE_DB_URL`/`TARGET_DB_URL` at the **IPv4 session pooler** (port 5432) and set
+**`SOURCE_REPLICATION_URL`** to the source *direct* host. This does NOT route WAL
+through the pooler - replication stays direct: `SOURCE_REPLICATION_URL` is the
+subscription's CONNECTION, dialed by the **target's walreceiver over Supabase's
+internal network**, while the pooler only fronts pgshift's own admin/seed/reconcile
+queries. It works, but prefer the add-on - the split is a last resort.
 `doctor` classifies each URL and tells you which case you're in.
 
 **What logical replication does NOT carry → do this FIRST.**

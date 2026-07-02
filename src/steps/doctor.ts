@@ -163,10 +163,12 @@ export async function doctor(
           "subscription's CONNECTION must be the DIRECT host (db.<ref>.supabase.co); the pooler can't stream WAL.",
       );
     else
-      warn(
-        "SOURCE_DB_URL is a POOLER endpoint — fine for these read-only checks, but the replication " +
-          "subscription's CONNECTION must be the DIRECT host (db.<ref>.supabase.co); the pooler can't " +
-          "stream WAL. Set SOURCE_REPLICATION_URL to the source direct host.",
+      fail(
+        "SOURCE_DB_URL is a POOLER endpoint and SOURCE_REPLICATION_URL is unset - replicate would " +
+          "point CREATE SUBSCRIPTION at the pooler, which cannot stream WAL, so the subscription " +
+          "would never sync. Set SOURCE_REPLICATION_URL to the source DIRECT host " +
+          "(db.<ref>.supabase.co), or enable the source's IPv4 add-on and use the direct host as " +
+          "SOURCE_DB_URL.",
       );
     if (src.isTransactionPooler)
       fail(
