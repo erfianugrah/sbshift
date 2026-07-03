@@ -211,6 +211,21 @@ export class MgmtApi {
     return { ok: true, status, lints: body.lints ?? [] };
   }
 
+  /**
+   * Lightweight token liveness probe: GET /v1/organizations succeeds for any
+   * valid PAT and 401s for an expired/revoked one, without needing a project ref
+   * (so it works during prep, before the target exists). Never throws - returns
+   * the status so callers (doctor) can downgrade to a warning rather than fail.
+   */
+  async validateToken(): Promise<{ ok: boolean; status: number }> {
+    try {
+      const res = await fetch(`${API_BASE}/organizations`, { headers: this.headers() });
+      return { ok: res.ok, status: res.status };
+    } catch {
+      return { ok: false, status: 0 };
+    }
+  }
+
   /** Sanity check: token valid and both refs visible to this account. */
   async assertAccess(refs: string[]): Promise<void> {
     for (const ref of refs) {

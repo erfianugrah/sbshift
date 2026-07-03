@@ -7,6 +7,7 @@ import { sourcePrepFor } from "../kb/engine-prep.ts";
 import { lookupProviderHint } from "../kb/provider-hints.ts";
 import { evalRules } from "../kb/source-prep-eval.ts";
 import { log } from "../log.ts";
+import { MgmtApi } from "../mgmt.ts";
 import { extensionStatements, missingExtensions } from "./bootstrap.ts";
 import {
   checkCustomPostgresConfig,
@@ -75,6 +76,44 @@ export function externalDepDumpCommand(deps: string[]): string {
   );
 }
 
+/**
+ * Token liveness classification for the doctor summary. A PRESENT token is not
+ * enough - doctor is the pre-flight gate, so a green tick here must mean the
+ * Management API actually accepted it. An expired/revoked PAT 401s; that is a
+ * WARN (config-sync/provision/create will fail) rather than a hard FAIL, since
+ * pure-PG migrations never need the token at all.
+ */
+export async function checkAccessToken(
+  token: string | undefined,
+  validate: (token: string) => Promise<{ ok: boolean; status: number }>,
+): Promise<{ level: "ok" | "warn"; message: string }> {
+  if (!token) {
+    return {
+      level: "warn",
+      message: "SUPABASE_ACCESS_TOKEN unset - config-sync will be unavailable",
+    };
+  }
+  const { ok, status } = await validate(token);
+  if (ok) {
+    return { level: "ok", message: "SUPABASE_ACCESS_TOKEN valid (config-sync available)" };
+  }
+  if (status === 401) {
+    return {
+      level: "warn",
+      message:
+        "SUPABASE_ACCESS_TOKEN present but REJECTED (HTTP 401) - expired/revoked. " +
+        "config-sync/provision/create will fail; generate a fresh PAT at " +
+        "https://supabase.com/dashboard/account/tokens",
+    };
+  }
+  return {
+    level: "warn",
+    message:
+      `SUPABASE_ACCESS_TOKEN present but could not be validated (HTTP ${status}) - ` +
+      "Management API unreachable; config-sync may be unavailable",
+  };
+}
+
 /** Pure: compare a reconcile table's pinned hashColumns against the live schema. */
 export function diffHashColumns(
   pinned: string[] | undefined,
@@ -107,6 +146,8 @@ export async function doctor(
     mysqlConnect?: (url: string) => Promise<MySqlConn>;
     /** Injected for tests; defaults to the real mssql-backed connector (heterogeneous path). */
     sqlServerConnect?: (url: string) => Promise<SqlServerConn>;
+    /** Injected for tests; defaults to a live GET /v1/organizations via MgmtApi. */
+    validateToken?: (token: string) => Promise<{ ok: boolean; status: number }>;
   } = {},
 ): Promise<DoctorReport> {
   const r: DoctorReport = { pass: 0, warn: 0, fail: 0 };
@@ -130,9 +171,11 @@ export async function doctor(
       ? `source ref ${cfg.source.ref}  →  target ref ${cfg.target.ref}`
       : `source engine ${cfg.source.engine}  →  target ref ${cfg.target.ref}`,
   );
-  secrets.SUPABASE_ACCESS_TOKEN
-    ? ok("SUPABASE_ACCESS_TOKEN present (config-sync available)")
-    : warn("SUPABASE_ACCESS_TOKEN unset — config-sync will be unavailable");
+  {
+    const validate = opts.validateToken ?? ((t: string) => new MgmtApi(t).validateToken());
+    const tc = await checkAccessToken(secrets.SUPABASE_ACCESS_TOKEN, validate);
+    (tc.level === "ok" ? ok : warn)(tc.message);
+  }
 
   // Heterogeneous source (mysql/sqlserver): a mysql://-style DSN driven by Debezium CDC. The PG
   // pooler/direct ladder, pg_* source checks, and CREATE-SUBSCRIPTION target checks don't apply.

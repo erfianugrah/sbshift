@@ -186,10 +186,12 @@ can be the **pooler** (read for dump, write for restore) — direct is not requi
 > `pg_dump` inside a version-matched container). For a Supabase source it auto-excludes the
 > managed schemas and filters the reserved roles (`anon`/`supabase_*`/`postgres`/…) exactly
 > like `supabase db dump`, so you never hit the `supabase_admin` ownership / `cli_login_postgres`
-> grant errors the manual path warns about below. `bootstrap` does **not** do the `auth` ROW
-> data (6a's `auth.sql`) — that one step stays manual (see step 6d / the FK-trap command
-> `doctor` prints). The manual `supabase db dump` flow below remains the fallback when you
-> can't run the system `pg_dump`/`pg_dumpall`.
+> grant errors the manual path warns about below. Pass **`--with-auth-data`** to also do the
+> `auth` ROW data (the `auth.users` FK pre-step) in the same run - it dumps the auth-schema
+> rows and restores them with `session_replication_role = replica` so FK triggers are deferred
+> during the load (`bun start bootstrap --with-auth-data --confirm`). Without that flag the auth
+> data is skipped (see step 6d / the FK-trap command `doctor` prints). The manual `supabase db
+> dump` flow below remains the fallback when you can't run the system `pg_dump`/`pg_dumpall`.
 
 ```bash
 SRC="<SOURCE_POOLER_OR_DIRECT_URL>"
@@ -505,7 +507,7 @@ project becomes a cold standby.
 | `bun start status [--json] [--require-synced]` | one-shot replication snapshot (sub state, srsubstate, slot active, WAL retained, lag) for a scheduled watcher |
 | `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded, custom `pg_db_role_setting` GUC overrides) |
 | `bun start preflight` | read-only hard-gate checks; throws on failure |
-| `bun start bootstrap [--confirm] [--all-schemas] [--out-dir P]` | prepare the TARGET: enable extensions + restore roles + schema from source (Supabase-aware role/schema filter); preview unless `--confirm` |
+| `bun start bootstrap [--confirm] [--all-schemas] [--with-auth-data] [--out-dir P]` | prepare the TARGET: enable extensions + restore roles + schema from source (Supabase-aware role/schema filter); `--with-auth-data` also loads the auth-schema row data (FK pre-step); preview unless `--confirm` |
 | `bun start replicate` | publication + slot + subscription (starts initial copy) |
 | `bun start watch` | poll initial-sync state + WAL-bloat watchdog |
 | `bun start reconcile [--mode chunked\|full] [--buckets N] [--max-examples N]` | checksum source vs target |

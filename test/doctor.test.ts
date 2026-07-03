@@ -1,12 +1,44 @@
 import { describe, expect, test } from "bun:test";
 import { classifyConn } from "../src/db.ts";
 import {
+  checkAccessToken,
   diffHashColumns,
   externalDeps,
   type Fk,
   providerHint,
   providerNotes,
 } from "../src/steps/doctor.ts";
+
+describe("checkAccessToken", () => {
+  const never = async () => {
+    throw new Error("validate should not be called when token is unset");
+  };
+
+  test("unset token -> warn, validator never called", async () => {
+    const r = await checkAccessToken(undefined, never);
+    expect(r.level).toBe("warn");
+    expect(r.message).toContain("unset");
+  });
+
+  test("valid token -> ok (green tick means the API accepted it)", async () => {
+    const r = await checkAccessToken("sbp_good", async () => ({ ok: true, status: 200 }));
+    expect(r.level).toBe("ok");
+    expect(r.message).toContain("valid");
+  });
+
+  test("expired/revoked token (401) -> warn, not a false green", async () => {
+    const r = await checkAccessToken("sbp_dead", async () => ({ ok: false, status: 401 }));
+    expect(r.level).toBe("warn");
+    expect(r.message).toContain("401");
+    expect(r.message).toContain("expired/revoked");
+  });
+
+  test("transient API failure (0/5xx) -> warn, distinct from 401", async () => {
+    const r = await checkAccessToken("sbp_x", async () => ({ ok: false, status: 0 }));
+    expect(r.level).toBe("warn");
+    expect(r.message).toContain("could not be validated");
+  });
+});
 
 describe("classifyConn", () => {
   test("direct Supabase host → ref extracted, not pooler", () => {

@@ -5,6 +5,28 @@ All notable changes to sbshift are documented here. Format loosely follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0, minor
 versions may carry behaviour changes.
 
+## [Unreleased]
+
+### Added
+
+- `bootstrap --with-auth-data` runs the `auth.users` FK pre-step in the same
+  pass: dumps the auth-schema ROW data (`pg_dump --data-only --schema=auth`) and
+  restores it with `session_replication_role = replica` so FK triggers are
+  deferred during the load. Previously this was a manual `supabase db dump` step
+  the operator had to run between `bootstrap` and `replicate`. Preview-gated like
+  the rest of `bootstrap` (no-op without `--confirm`). New pure argv builders
+  `dumpAuthDataCmd` / `restoreAuthDataCmd` (unit-tested).
+
+### Changed
+
+- `doctor` now **validates** `SUPABASE_ACCESS_TOKEN` against the Management API
+  (`GET /v1/organizations`) instead of only checking it is present. An
+  expired/revoked PAT previously showed a green `config-sync available` tick and
+  only failed later at the first Management-API call; it now reports a warning
+  (HTTP 401 - expired/revoked, with the token-refresh URL). Non-fatal by design
+  (pure-PG migrations never need the token). New pure helper `checkAccessToken`
+  in `src/steps/doctor.ts` + `MgmtApi.validateToken()` (both unit-tested).
+
 ## [0.3.0] - 2026-07-03
 
 ### Changed

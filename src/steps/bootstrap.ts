@@ -19,10 +19,11 @@ import { log } from "../log.ts";
  * them in the load-bearing order with the right flags. Like `provision`/`claim`
  * it PREVIEWS by default and only mutates the target with `--confirm`.
  *
- * Scope: extensions + roles (no passwords) + schema (DDL). The one Supabase-
- * specific remainder — `auth`/`storage` row data — stays a documented manual
- * step (`supabase db dump --data-only --schema auth`); `doctor` prints the exact
- * command when it detects a cross-schema FK into it.
+ * Scope: extensions + roles (no passwords) + schema (DDL). The Supabase-specific
+ * `auth`/`storage` ROW data is opt-in via `--with-auth-data` (dumps the auth
+ * schema rows and restores them with FK triggers deferred - the auth.users FK
+ * pre-step); without that flag it's skipped and `doctor` prints the exact manual
+ * command when it detects a cross-schema FK into auth.
  */
 
 /** Extensions that always exist on a fresh database — never worth "enabling". */
@@ -325,6 +326,56 @@ export function restoreSchemaCmd(targetUrl: string, file: string): string[] {
   ];
 }
 
+/**
+ * Pure: `pg_dump` argv for the ROW DATA of the cross-schema dependency schemas a
+ * replicated table FKs into (canonically `auth`). Logical replication does NOT
+ * carry these rows, but `public.<t>.user_id -> auth.users` means they must exist
+ * on the target BEFORE the initial copy or every child row is FK-rejected. Data-
+ * only (the schema objects are Supabase-managed and already present). We do NOT
+ * pass `--disable-triggers` (that needs table ownership/superuser on the managed
+ * auth tables) - the restore session sets `session_replication_role = replica`
+ * instead, which is what defers FK enforcement during the load.
+ */
+export function dumpAuthDataCmd(
+  sourceUrl: string,
+  file: string,
+  schemas: string[] = ["auth"],
+): string[] {
+  return [
+    "pg_dump",
+    "--data-only",
+    "--no-owner",
+    "--no-privileges",
+    ...schemas.flatMap((s) => [`--schema=${s}`]),
+    "-d",
+    sourceUrl,
+    "-f",
+    file,
+  ];
+}
+
+/**
+ * Pure: `psql` argv to restore the auth ROW data atomically with FK/triggers
+ * deferred. `--command 'SET session_replication_role = replica'` runs FIRST in
+ * the same session (psql executes -c before -f), so the COPY/INSERT blocks that
+ * follow don't trip cross-table FK triggers mid-load. Single-transaction +
+ * stop-on-error so a partial auth load never lands.
+ */
+export function restoreAuthDataCmd(targetUrl: string, file: string): string[] {
+  return [
+    "psql",
+    "--single-transaction",
+    "--variable",
+    "ON_ERROR_STOP=1",
+    "--command",
+    "SET session_replication_role = replica",
+    "-f",
+    file,
+    "-d",
+    targetUrl,
+  ];
+}
+
 export interface BootstrapResult {
   ok: boolean;
   planned: number;
@@ -349,7 +400,14 @@ export async function bootstrap(
   target: Db,
   cfg: Config,
   secrets: Secrets,
-  opts: { confirm: boolean; outDir: string; allSchemas?: boolean; supabaseSource?: boolean },
+  opts: {
+    confirm: boolean;
+    outDir: string;
+    allSchemas?: boolean;
+    supabaseSource?: boolean;
+    /** Also dump+restore the auth-schema ROW data (the auth.users FK pre-step). */
+    withAuthData?: boolean;
+  },
 ): Promise<BootstrapResult> {
   log.step(`bootstrap target ${cfg.target.ref}${opts.confirm ? "" : " (preview only)"}`);
   const result: BootstrapResult = { ok: true, planned: 0, applied: 0 };
@@ -446,14 +504,41 @@ export async function bootstrap(
     log.ok("roles + schema restored onto target");
   }
 
+  // ── 3. auth ROW data (opt-in: the auth.users cross-schema FK pre-step) ────
+  if (opts.withAuthData) {
+    log.info("--- Auth row data (auth.users FK pre-step) ---");
+    const authFile = `${opts.outDir}/bootstrap-auth-data.sql`;
+    const authDump: SpawnStep = {
+      label: "dump auth data",
+      cmd: dumpAuthDataCmd(secrets.SOURCE_DB_URL, authFile),
+    };
+    const authRestore: SpawnStep = {
+      label: "restore auth data (triggers deferred)",
+      cmd: restoreAuthDataCmd(secrets.TARGET_DB_URL, authFile),
+    };
+    result.planned += 2;
+    log.detail(`${authDump.label}: ${redactArgv(authDump.cmd)}`);
+    log.detail(`${authRestore.label}: ${redactArgv(authRestore.cmd)}`);
+    if (opts.confirm) {
+      await spawnStep(authDump);
+      result.applied++;
+      await spawnStep(authRestore);
+      result.applied++;
+      log.ok("auth row data restored onto target (FK prerequisite satisfied)");
+    }
+  }
+
   // ── summary ──────────────────────────────────────────────────────────────
   if (result.planned === 0) {
     log.ok("bootstrap: nothing to do (target already prepared)");
   } else if (!opts.confirm) {
+    const authNote = opts.withAuthData
+      ? "restores roles + schema + auth row data"
+      : "restores roles + schema (auth/storage ROW data is a separate step - re-run with " +
+        "--with-auth-data, or see doctor's cross-schema FK hint)";
     log.warn(
-      `${result.planned} action(s) planned. Re-run with --confirm to apply — this MUTATES THE TARGET ` +
-        "(enables extensions, restores roles + schema). Auth/storage ROW data is a separate manual " +
-        "step (see doctor's cross-schema FK hint).",
+      `${result.planned} action(s) planned. Re-run with --confirm to apply - this MUTATES THE TARGET ` +
+        `(enables extensions, ${authNote}).`,
     );
   }
   return result;

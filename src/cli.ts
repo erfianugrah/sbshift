@@ -186,12 +186,18 @@ program
     "dump EVERY schema (default: a Supabase source excludes auth/storage/etc., which already exist on the target)",
     false,
   )
+  .option(
+    "--with-auth-data",
+    "also dump+restore the auth-schema ROW data (the auth.users FK pre-step) with FK triggers deferred",
+    false,
+  )
   .action((o) =>
     withDb(async ({ source, target }, cfg) => {
       const r = await bootstrap(source, target, cfg, loadSecrets(), {
         confirm: Boolean(o.confirm),
         outDir: o.outDir,
         allSchemas: Boolean(o.allSchemas),
+        withAuthData: Boolean(o.withAuthData),
       });
       if (!r.ok) process.exitCode = 1;
     }),

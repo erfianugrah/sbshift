@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  dumpAuthDataCmd,
   dumpRolesCmd,
   dumpSchemaCmd,
   extensionStatements,
@@ -9,6 +10,7 @@ import {
   missingExtensions,
   redactArgv,
   redactUrl,
+  restoreAuthDataCmd,
   restoreRolesCmd,
   restoreSchemaCmd,
   SUPABASE_MANAGED_SCHEMAS,
@@ -132,6 +134,44 @@ describe("dump/restore command builders", () => {
       TGT,
       "-f",
       "/o/schema.sql",
+    ]);
+  });
+
+  test("dumpAuthDataCmd: data-only, defaults to the auth schema", () => {
+    expect(dumpAuthDataCmd(SRC, "/o/auth.sql")).toEqual([
+      "pg_dump",
+      "--data-only",
+      "--no-owner",
+      "--no-privileges",
+      "--schema=auth",
+      "-d",
+      SRC,
+      "-f",
+      "/o/auth.sql",
+    ]);
+  });
+
+  test("dumpAuthDataCmd: multiple dep schemas emit one --schema each, no --disable-triggers", () => {
+    const cmd = dumpAuthDataCmd(SRC, "/o/auth.sql", ["auth", "storage"]);
+    expect(cmd.filter((a) => a.startsWith("--schema="))).toEqual([
+      "--schema=auth",
+      "--schema=storage",
+    ]);
+    expect(cmd).not.toContain("--disable-triggers");
+  });
+
+  test("restoreAuthDataCmd: defers FK triggers via session_replication_role, atomic", () => {
+    expect(restoreAuthDataCmd(TGT, "/o/auth.sql")).toEqual([
+      "psql",
+      "--single-transaction",
+      "--variable",
+      "ON_ERROR_STOP=1",
+      "--command",
+      "SET session_replication_role = replica",
+      "-f",
+      "/o/auth.sql",
+      "-d",
+      TGT,
     ]);
   });
 });
