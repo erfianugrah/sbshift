@@ -77,6 +77,57 @@ export async function checkReplicationCapacity(
     );
 }
 
+export interface ReplicationSlotRow {
+  slot_name: string;
+  plugin: string | null;
+  active: boolean;
+}
+
+/**
+ * Pure: logical replication slots present on the source that are NOT ours - a potential
+ * competing CDC consumer (Artie, ClickPipes, PeerDB, Debezium, ...). An UNDISCOVERED one of
+ * these has aborted a real migration the night before cutover: it can hold WAL retention
+ * hostage and interact unpredictably with this tool's own slot/publication. Physical slots
+ * (streaming replicas, pg_basebackup) are excluded by the caller's query - a different risk
+ * already covered by `checkReplicationCapacity`'s slot/sender headroom check.
+ */
+export function foreignLogicalSlots(
+  rows: ReplicationSlotRow[],
+  ourSlot: string,
+): ReplicationSlotRow[] {
+  return rows
+    .filter((r) => r.slot_name !== ourSlot)
+    .sort((a, b) => a.slot_name.localeCompare(b.slot_name));
+}
+
+/**
+ * Report any logical replication slot on the source that isn't ours. Warn-only - a slot
+ * existing doesn't necessarily conflict, but an undiscovered one is exactly what has aborted
+ * migrations at the worst possible time (the night before cutover). Surfacing every logical
+ * slot up front turns that into a pre-flight question instead of a live-run surprise.
+ */
+export async function checkForeignReplicationSlots(
+  source: Db,
+  cfg: Config,
+  sink: CapacitySink,
+): Promise<void> {
+  const rows = await source<ReplicationSlotRow[]>`
+    SELECT slot_name, plugin, active FROM pg_replication_slots WHERE slot_type = 'logical'`;
+  const foreign = foreignLogicalSlots(rows, cfg.replication.slot);
+  if (foreign.length === 0) {
+    sink.ok("no foreign logical replication slots on source (no competing CDC consumers found)");
+    return;
+  }
+  for (const f of foreign) {
+    sink.warn(
+      `foreign logical replication slot on source: "${f.slot_name}" (plugin=${f.plugin ?? "?"}, ` +
+        `active=${f.active}) - a competing CDC consumer (e.g. Artie, ClickPipes, PeerDB, Debezium) ` +
+        "can hold WAL retention and interact unpredictably with this migration. Confirm it's " +
+        "expected and accounted for before running `replicate`.",
+    );
+  }
+}
+
 /**
  * "Invisible" custom Postgres config detection.
  *

@@ -1,7 +1,11 @@
 import type { Config } from "../config.ts";
 import type { Db } from "../db.ts";
 import { log } from "../log.ts";
-import { checkReplicationCapacity, subscribeGrantSQL } from "./checks.ts";
+import {
+  checkForeignReplicationSlots,
+  checkReplicationCapacity,
+  subscribeGrantSQL,
+} from "./checks.ts";
 
 /** Read-only checks that must pass before we touch anything. Throws on hard failures. */
 export async function preflight(source: Db, target: Db, cfg: Config): Promise<void> {
@@ -106,6 +110,14 @@ export async function preflight(source: Db, target: Db, cfg: Config): Promise<vo
   const [existingPub] = await source`
     SELECT 1 FROM pg_publication WHERE pubname = ${cfg.replication.publication}`;
   if (existingPub) log.warn(`publication ${cfg.replication.publication} already exists on source`);
+
+  // 6. Foreign logical replication slots (competing CDC consumers: Artie/ClickPipes/PeerDB/
+  //    Debezium) - an undiscovered one of these has aborted a real migration the night before
+  //    cutover. Warn-only; catch it here instead of mid-run.
+  await checkForeignReplicationSlots(source, cfg, {
+    ok: (m) => log.ok(m),
+    warn: (m) => log.warn(m),
+  });
 
   if (hardFail) throw new Error("preflight failed — resolve the ✗ items above before continuing");
   log.ok("preflight passed");

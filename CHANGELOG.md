@@ -9,6 +9,23 @@ versions may carry behaviour changes.
 
 ### Added
 
+- `doctor` now diffs `extversion` (not just presence) for every extension installed on
+  both source and target, and warns when the versions differ with the exact
+  `ALTER EXTENSION <name> UPDATE` remediation. A handful of extensions
+  (`pg_net`, `wrappers`, `pg_cron`, `pg_repack`) have a documented history of
+  breaking on a version jump - either a binary/catalog mismatch that crashes
+  background workers until the `UPDATE` is run, or gaps in their own upgrade
+  path between some versions - so those get an extra risk note. New pure
+  helpers `diffExtensionVersions` / `extensionRiskNote` in `src/steps/doctor.ts`
+  (unit-tested).
+- `doctor` and `preflight` now list any **logical replication slot on the
+  source that isn't sbshift's own** and warn about it before touching
+  anything. A slot from an unrelated CDC/replication consumer (e.g. another
+  ETL or sync tool) can hold WAL retention hostage and interact
+  unpredictably with a migration if it's discovered mid-run instead of ahead
+  of time. New shared helper `checkForeignReplicationSlots` /
+  `foreignLogicalSlots` in `src/steps/checks.ts` (unit-tested; also exercised
+  against a real Postgres pair with an injected foreign slot).
 - `bootstrap --with-auth-data` runs the `auth.users` FK pre-step in the same
   pass: dumps the auth-schema ROW data (`pg_dump --data-only --schema=auth`) and
   restores it with `session_replication_role = replica` so FK triggers are

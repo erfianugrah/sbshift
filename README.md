@@ -251,7 +251,12 @@ grouped under the command that owns it.
 - **`doctor`** catches the structural traps → the cross-schema `auth.users` FK (its data must
   exist on the target before the copy), and a published table missing from
   `pg_subscription_rel` (added to the publication after the subscription existed = silently not
-  replicating; re-run `replicate` to `REFRESH PUBLICATION`).
+  replicating; re-run `replicate` to `REFRESH PUBLICATION`). It also diffs `extversion` (not
+  just presence) for extensions installed on both sides - a version jump can silently change
+  behaviour or leave an extension with no forward `ALTER EXTENSION ... UPDATE` path at all
+  (`pg_net`, `wrappers`, `pg_cron`, `pg_repack` get an extra risk note) - and lists any logical
+  replication slot on the source that isn't its own (an unrelated CDC/sync consumer can hold
+  WAL retention hostage; better to know about it before `replicate`, not mid-run).
 
 ### Postgres realities it handles for you
 

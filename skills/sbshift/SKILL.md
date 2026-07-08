@@ -44,8 +44,9 @@ not the full procedure.
 
 ```
 doctor      readiness checklist (pooler-vs-direct, IPv6, wal_level, replica
-            identity, subscribe grant, schema loaded, extension diff, auth.users
-            FK trap, custom pg_db_role_setting GUC overrides config-sync can't
+            identity, subscribe grant, schema loaded, extension diff +
+            version mismatch, foreign replication slots, auth.users FK trap,
+            custom pg_db_role_setting GUC overrides config-sync can't
             carry). --source-only when target not created yet. Fail-closed.
   ↓
 [ pre-step, NOT automated — do this FIRST, see below ]
@@ -186,7 +187,7 @@ Engine is plain Postgres (the integration tier runs against vanilla `postgres:16
 - **Use:** `doctor`, `preflight`, `replicate`, `watch`, `reconcile`, `cutover`, `teardown`, `status`, `run`.
 - **Skip:** `config-sync` (no-ops without `SUPABASE_ACCESS_TOKEN`), `functions` (`functions.enabled: false`), `storage` (`storage.buckets: []`).
 - Use `pg_dump`/`pg_dumpall` for the roles/schema/extension pre-steps instead of the `supabase db dump` snippets.
-- `doctor`'s Supabase heuristics degrade to no-ops; the wal_level / replica-identity / version / grant / schema / extension checks still run.
+- `doctor`'s Supabase heuristics degrade to no-ops; the wal_level / replica-identity / version / grant / schema / extension (presence + version) / foreign-slot checks still run.
 
 **Azure Database for PostgreSQL (Flexible Server)** is plain PG11–17 → works as source/target with no code change. Azure gotchas (`doctor`/`preflight` warn where checkable): subscriber `max_worker_processes >= 16` (low Azure default → `out of background worker slots`), `wal_level=logical` via portal server-param + restart, replication role needs `ALTER ROLE x WITH REPLICATION` + `GRANT azure_pg_admin TO x`, Azure auto-drops idle slots at >=95% storage (flips read-only), and pre-PG17 HA failover doesn't preserve logical slots. **Not** Azure SQL Database/Managed Instance — that's SQL Server (T-SQL), a heterogeneous migration, out of scope.
 

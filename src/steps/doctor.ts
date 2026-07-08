@@ -11,6 +11,7 @@ import { MgmtApi } from "../mgmt.ts";
 import { extensionStatements, missingExtensions } from "./bootstrap.ts";
 import {
   checkCustomPostgresConfig,
+  checkForeignReplicationSlots,
   checkReplicationCapacity,
   subscribeGrantSQL,
 } from "./checks.ts";
@@ -44,6 +45,64 @@ export interface Fk {
   table: string;
   /** schema.table it references */
   references: string;
+}
+
+export interface ExtVersionRow {
+  extname: string;
+  extversion: string;
+}
+
+export interface ExtensionVersionMismatch {
+  extname: string;
+  source: string;
+  target: string;
+}
+
+/**
+ * Pure: extensions present on BOTH sides whose installed version differs. A version jump can
+ * silently change behaviour, or - worse - have no forward `ALTER EXTENSION ... UPDATE` path at
+ * all. Existence-only diffing (see `missingExtensions`) can't see this; it only catches an
+ * extension missing entirely, not one present-but-stale on the target.
+ */
+export function diffExtensionVersions(
+  source: ExtVersionRow[],
+  target: ExtVersionRow[],
+): ExtensionVersionMismatch[] {
+  const tgtMap = new Map(target.map((e) => [e.extname, e.extversion]));
+  const out: ExtensionVersionMismatch[] = [];
+  for (const s of source) {
+    const t = tgtMap.get(s.extname);
+    if (t !== undefined && t !== s.extversion)
+      out.push({ extname: s.extname, source: s.extversion, target: t });
+  }
+  return out.sort((a, b) => a.extname.localeCompare(b.extname));
+}
+
+/**
+ * Extensions with a documented history of breaking on a Postgres version jump. `pg_net` and
+ * `wrappers` have shipped binary-vs-catalog version mismatches after an upgrade that crash
+ * background workers until `ALTER EXTENSION ... UPDATE` is run; `pg_cron` and `pg_repack` have
+ * historically shipped gaps in their UPDATE path between some versions, which can leave a
+ * project with no forward path at all. Not exhaustive - extend as you hit more.
+ */
+export const EXTENSION_UPDATE_RISK: Record<string, string> = {
+  pg_net:
+    "binary/catalog version mismatches have crashed background workers post-upgrade until " +
+    "`ALTER EXTENSION pg_net UPDATE` runs - verify the update succeeds before relying on it live",
+  wrappers:
+    "same binary/catalog mismatch symptom observed as pg_net - verify " +
+    "`ALTER EXTENSION wrappers UPDATE` succeeds",
+  pg_cron:
+    "missing minor-version UPDATE paths have left a project unrecoverable in production - " +
+    "confirm a path from the source version to the target version exists BEFORE cutover, not after",
+  pg_repack:
+    "has historically shipped with no UPDATE path between some versions - confirm one exists " +
+    "for this exact version pair before depending on it",
+};
+
+/** Known-risk note for an extension name, if any. Exported for tests. */
+export function extensionRiskNote(extname: string): string | undefined {
+  return EXTENSION_UPDATE_RISK[extname];
 }
 
 /**
@@ -418,6 +477,11 @@ async function sourceChecks(source: Db, cfg: Config, s: Sink): Promise<void> {
   const pub = await runCheck(q, check("source.publication_absent"), [cfg.replication.publication]);
   if (pub.present) s.warn(`publication ${cfg.replication.publication} already exists on source`);
 
+  // foreign logical replication slots - a competing CDC consumer (Artie/ClickPipes/PeerDB/
+  // Debezium) can hold WAL retention hostage; undiscovered ones have aborted real migrations
+  // the night before cutover.
+  await checkForeignReplicationSlots(source, cfg, s);
+
   // row counts (informational — drives copy-time + WAL expectations)
   for (const qt of cfg.replication.tables) {
     const [schema, table] = qt.split(".");
@@ -468,8 +532,12 @@ async function targetChecks(
   if (sourceReachable) {
     const IGNORE = new Set(["plpgsql"]);
     const [srcExt, tgtExt] = await Promise.all([
-      source`SELECT extname FROM pg_extension`,
-      target`SELECT extname FROM pg_extension`,
+      source<
+        { extname: string; extversion: string }[]
+      >`SELECT extname, extversion FROM pg_extension`,
+      target<
+        { extname: string; extversion: string }[]
+      >`SELECT extname, extversion FROM pg_extension`,
     ]);
     // missingExtensions already excludes built-ins (plpgsql); keep IGNORE for any
     // doctor-specific additions but defer the core filter to the shared helper.
@@ -483,6 +551,26 @@ async function targetChecks(
       s.warn(`target missing source extensions (enable before schema load): ${missing.join(", ")}`);
       for (const stmt of extensionStatements(missing)) log.detail(`fix: ${stmt}`);
       log.detail("or run: sbshift bootstrap --confirm (enables these + restores roles + schema)");
+    }
+
+    // extensions present on BOTH sides but at a different version: a version jump can silently
+    // change behaviour or, worse, have no forward UPDATE path at all. Existence-only diffing
+    // above can't see this.
+    const mismatches = diffExtensionVersions(
+      srcExt.map((e) => ({ extname: String(e.extname), extversion: String(e.extversion) })),
+      tgtExt.map((e) => ({ extname: String(e.extname), extversion: String(e.extversion) })),
+    );
+    if (mismatches.length === 0) {
+      s.ok("no extension version mismatches between source and target");
+    } else {
+      for (const m of mismatches) {
+        const risk = extensionRiskNote(m.extname);
+        s.warn(
+          `extension ${m.extname} version differs: source=${m.source} target=${m.target} - run ` +
+            `\`ALTER EXTENSION ${m.extname} UPDATE\` on the target after cutover` +
+            (risk ? `. KNOWN RISK: ${risk}` : ""),
+        );
+      }
     }
   }
 

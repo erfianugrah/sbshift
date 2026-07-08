@@ -35,7 +35,7 @@ answers up front is what makes the rest of the runbook mechanical.
 | Owned sequences (serial/IDENTITY) | `\d <table>` | resynced at cutover; none needed for uuid/text PKs |
 | Storage buckets / objects | dashboard | replicated separately (`storage` step) or skipped if none |
 | Edge Functions | dashboard | transferred separately (`functions` step) or skipped if none |
-| Non-default extensions | `select * from pg_extension;` | must be enabled on the target before the schema load |
+| Non-default extensions | `select extname, extversion from pg_extension;` | must be enabled on the target before the schema load; `doctor` also flags an installed extension whose version DIFFERS between source and target |
 | Custom LOGIN roles | `\du` | passwords are not dumped — reset them manually on the target if any |
 
 > If your `supabase` CLI can't find its Go binary, export `SUPABASE_GO_BINARY` to its path
@@ -505,7 +505,7 @@ project becomes a cold standby.
 |---|---|
 | `bun start run [--through P] [--json] [--confirm-writes-stopped]` | autonomous pipeline (preflight→replicate→watch→reconcile[→cutover]); exit 0 iff the requested range passed. For CI/Lambda. |
 | `bun start status [--json] [--require-synced]` | one-shot replication snapshot (sub state, srsubstate, slot active, WAL retained, lag) for a scheduled watcher |
-| `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded, custom `pg_db_role_setting` GUC overrides) |
+| `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded, extension version mismatches, foreign replication slots, custom `pg_db_role_setting` GUC overrides) |
 | `bun start preflight` | read-only hard-gate checks; throws on failure |
 | `bun start bootstrap [--confirm] [--all-schemas] [--with-auth-data] [--out-dir P]` | prepare the TARGET: enable extensions + restore roles + schema from source (Supabase-aware role/schema filter); `--with-auth-data` also loads the auth-schema row data (FK pre-step); preview unless `--confirm` |
 | `bun start replicate` | publication + slot + subscription (starts initial copy) |

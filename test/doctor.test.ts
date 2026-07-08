@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { classifyConn } from "../src/db.ts";
 import {
   checkAccessToken,
+  diffExtensionVersions,
   diffHashColumns,
+  extensionRiskNote,
   externalDeps,
   type Fk,
   providerHint,
@@ -316,5 +318,64 @@ describe("diffHashColumns", () => {
   test("a generated column counts as existing, not nonexistent", () => {
     const d = diffHashColumns(["id", "content", "title", "search_vector"], live, gen);
     expect(d.nonexistent).toEqual([]);
+  });
+});
+
+describe("diffExtensionVersions - extensions present on both sides at different versions", () => {
+  test("no overlap -> no mismatches", () => {
+    expect(diffExtensionVersions([{ extname: "pg_net", extversion: "0.9.0" }], [])).toEqual([]);
+  });
+
+  test("same version on both sides -> no mismatch", () => {
+    const src = [{ extname: "pgaudit", extversion: "1.7" }];
+    const tgt = [{ extname: "pgaudit", extversion: "1.7" }];
+    expect(diffExtensionVersions(src, tgt)).toEqual([]);
+  });
+
+  test("different version on target -> reported with both versions", () => {
+    const src = [{ extname: "pg_net", extversion: "0.9.0" }];
+    const tgt = [{ extname: "pg_net", extversion: "0.14.0" }];
+    expect(diffExtensionVersions(src, tgt)).toEqual([
+      { extname: "pg_net", source: "0.9.0", target: "0.14.0" },
+    ]);
+  });
+
+  test("missing on target entirely is NOT a version mismatch (that's missingExtensions' job)", () => {
+    const src = [{ extname: "hypopg", extversion: "1.4.1" }];
+    expect(diffExtensionVersions(src, [])).toEqual([]);
+  });
+
+  test("multiple mismatches sorted by extname", () => {
+    const src = [
+      { extname: "wrappers", extversion: "0.4.0" },
+      { extname: "pg_cron", extversion: "1.6" },
+    ];
+    const tgt = [
+      { extname: "wrappers", extversion: "0.4.3" },
+      { extname: "pg_cron", extversion: "1.6.4" },
+    ];
+    expect(diffExtensionVersions(src, tgt).map((m) => m.extname)).toEqual(["pg_cron", "wrappers"]);
+  });
+});
+
+describe("extensionRiskNote - known extension-update-path risk callouts", () => {
+  test("pg_net -> flags binary/catalog mismatch history", () => {
+    expect(extensionRiskNote("pg_net")).toContain("ALTER EXTENSION pg_net UPDATE");
+  });
+
+  test("pg_cron -> flags missing-update-path history", () => {
+    expect(extensionRiskNote("pg_cron")).toMatch(/unrecoverable/);
+  });
+
+  test("pg_repack -> flags no-update-path history", () => {
+    expect(extensionRiskNote("pg_repack")).toMatch(/no UPDATE path/);
+  });
+
+  test("wrappers -> flags same symptom as pg_net", () => {
+    expect(extensionRiskNote("wrappers")).toContain("pg_net");
+  });
+
+  test("unknown extension -> undefined (no false alarm)", () => {
+    expect(extensionRiskNote("hypopg")).toBeUndefined();
   });
 });
