@@ -5,9 +5,45 @@ All notable changes to sbshift are documented here. Format loosely follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Pre-1.0, minor
 versions may carry behaviour changes.
 
-## [Unreleased]
+## [0.4.0] - 2026-07-29
 
 ### Added
+
+- **`sbshift upgrade` command group** (also aliased `pgupgrade` and nested as
+  `rehearse upgrade`): Postgres major-version upgrade rehearsal for the
+  pg_upgrade path. Four subcommands, none requiring a migrate.config.yaml:
+  - `upgrade doctor` - read-only, source-only readiness audit: extension
+    inventory with deprecated-on-target warnings, `reg*`-typed user columns
+    (OID-safety), md5-password roles, per-upgrade checklist, and a downtime
+    estimate grounded in measured disk-copy throughput + fixed platform
+    overhead.
+  - `upgrade capture` - logical snapshot (roles + schema + data, plus the auth
+    schema and its row data as separate deferred-FK dumps) with a
+    self-describing manifest.json. Size-guarded (--max-gb/--force).
+  - `upgrade lab` - Docker lab that times REAL `pg_upgrade --link` runs on
+    production-like data: restores a capture (or seeds a fixture schema to
+    --seed-gib), snapshots the datadir, runs N timed upgrades, then
+    extrapolates a production downtime window. Two image flavors: PGDG
+    dual-major (contrib-only) and a nix-store-merged supabase/postgres image
+    that carries the full platform extension set on BOTH majors, so
+    `pg_upgrade --check` exercises the exact extension-availability behavior
+    of the managed upgrade. Lab containers bind 127.0.0.1 only (trust-auth
+    pg_hba is lab-local).
+  - `upgrade verify` - proves the upgraded cluster is data-identical to the
+    pristine pre-upgrade copy by reusing the migration engine's
+    chunked-checksum reconcile verbatim, plus extension-version diff, auth
+    row-count sanity, and md5-role checks.
+- Migration `doctor` gains four warnings: **STORED generated columns** on
+  replicated tables (recomputed per-row by the subscriber; the measured
+  initial-copy throughput killer, ~7x slower with a STORED tsvector), **active
+  `cron.job` entries** (pause at the watermark; nothing on the target until
+  cutover), **vault/pgsodium root key** not carried by a manual dump/restore
+  (copy it while the source is still ACTIVE), and a **local pg_dump older
+  than the source server major** (fails with a GSSAPI negotiation error).
+  New pure helpers `parsePgMajor` / `guessLocalPgDumpMajor` (unit-tested).
+- `nonEmptyEnv()` helper: empty-string environment variables now mean "unset"
+  everywhere (loadSecrets and `upgrade verify`), so `VAR=` placeholders fail
+  required fields with 'Required' instead of a misleading 'Invalid URL'.
 
 - `doctor` now diffs `extversion` (not just presence) for every extension installed on
   both source and target, and warns when the versions differ with the exact
@@ -43,6 +79,15 @@ versions may carry behaviour changes.
   (HTTP 401 - expired/revoked, with the token-refresh URL). Non-fatal by design
   (pure-PG migrations never need the token). New pure helper `checkAccessToken`
   in `src/steps/doctor.ts` + `MgmtApi.validateToken()` (both unit-tested).
+- README restructured as a beginner-oriented single entry point: three-path
+  decision table, prerequisites with exact check commands, env-var table with
+  where-to-find-each-value guidance, quick starts for the migration pipeline
+  and the upgrade rehearsal, a full command reference with copy-paste
+  examples, a troubleshooting table, and the safety model. RUNBOOK synced
+  with cli.ts (including the reconcile-before-cutover phase order);
+  MIGRATION-SCOPE gains a 'region move is not data residency' section, a
+  read-replica stopgap note, and an operational safety-net checklist;
+  GUIDED-MIGRATION references the new doctor warnings.
 
 ## [0.3.0] - 2026-07-03
 
