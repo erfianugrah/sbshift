@@ -124,8 +124,11 @@ is what unlocks both the guided-run UX and the upstream sync.
 A new command walks the selected playbook:
 
 ```
-bun start guide mysql --target supabase [--phase source-prep] [--json]
+bun start guide mysql --json
 ```
+
+> **Note:** The current `guide` command renders a static playbook text. The interactive walkthrough described below
+> (detect -> guide -> verify -> gate) is a proposed enhancement. `--role` and `--json` are the only supported flags.
 
 For each item in phase order:
 
@@ -270,9 +273,23 @@ CDC-out-of-MySQL, which is exactly what a MySQL→PG guide must encode.
 
 The Supabase non-data plane (`auth.users` FK seeding, `storage` schema, RLS, `config-sync`,
 advisor `verify`, the cutover write-stop gate) is **already automated by sbshift** and is
-engine-independent — it runs identically whether rows arrived from PG logical replication
+engine-independent -- it runs identically whether rows arrived from PG logical replication
 or a Debezium MySQL stream. AWS DMS streams your rows and leaves all of this to you; this is
 the differentiator. See [`MIGRATION-SCOPE.md`](MIGRATION-SCOPE.md).
+
+**Doctor warnings to watch for in this phase:**
+
+- **STORED generated columns** -- the doctor detects them and warns they are excluded from the
+  reconcile hash (the subscriber recomputes them per-row, so hashing would show a false mismatch).
+  No action needed, but expect the warning.
+- **`cron.job` active jobs** -- the doctor warns if `pg_cron` has active jobs. Pause them at the
+  watermark before `bootstrap` so they do not fire on a half-migrated target.
+- **Vault / pgsodium root key** -- the doctor warns if `vault.secrets` is non-empty: the encryption
+  root key is NOT carried by a manual dump/restore. Copy it from the source via the Management API
+  if you use column encryption.
+- **pg_dump client version** -- the doctor checks the local `pg_dump --version` against the source
+  server major. If the client is older than the server, `bootstrap` will fail with a GSSAPI
+  negotiation error. Install a matching pg_dump (e.g. via `apt install postgresql-client-<major>`).
 
 ---
 

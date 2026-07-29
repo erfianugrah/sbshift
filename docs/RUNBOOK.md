@@ -288,8 +288,8 @@ observability stack owns the **app-tier** gates (right). Abort if either trips.
 | Phase | Watch (data-plane, this tool) | Watch (app-tier, your dashboards) |
 |---|---|---|
 | Initial copy (`watch`) | WAL retained MB < `watchdog.maxRetainedWalMb`; slot `active`; `wal_status` stays `reserved`/`extended` (not `lost`); `apply_error_count`/`sync_error_count` flat | source DB CPU / disk IOPS / disk latency headroom; source not approaching connection saturation |
-| Lag drain (`cutover` 9b) | lag → 0 within `--max-lag-wait`; quiesce check reports source WAL **quiescent** (no active write backends) | app confirmed in read-only / down; no client write retries hitting the source |
-| Verify (`reconcile` 9c) | `RECONCILE PASSED` (zero mismatched buckets, ledger clean) | — |
+| Verify (`reconcile` 9b) | `RECONCILE PASSED` (zero mismatched buckets, ledger clean) | - |
+| Lag drain + drop subscription (`cutover` 9c) | lag -> 0 within `--max-lag-wait`; quiesce check reports source WAL **quiescent** (no active write backends) | app confirmed in read-only / down; no client write retries hitting the source |
 | Post-repoint (9e) | sequences resynced (cutover log shows each `setval`) | target p95/p99 latency within X% of source baseline; 5xx < Y; connection pool not spiking from retry storms |
 
 **Hard abort thresholds (define concrete numbers from your baselines):**
@@ -325,13 +325,13 @@ Keep one dashboard view open for migration day: API RPS + p95/p99, 4xx/5xx + tim
 # 9a. STOP application writes to the SOURCE (put the app in read-only / take it down).
 #     This is the only moment of downtime.
 
-# 9b. drain replication lag to zero and drop the subscription:
-bun start cutover                     # default waits up to 300s for lag to drain
-#   (override: bun start cutover --max-lag-wait 600)
-
-# 9c. verify source == target:
+# 9b. verify source == target (writes stopped, data should match):
 bun start reconcile                   # chunked checksum; must print RECONCILE PASSED
 #   (full-table variant: bun start reconcile --mode full)
+
+# 9c. drain replication lag to zero and drop the subscription:
+bun start cutover                     # default waits up to 300s for lag to drain
+#   (override: bun start cutover --max-lag-wait 600)
 
 # 9d. load any deferred schedule/cron migration on the TARGET (the one skipped earlier):
 psql "$TARGET_DB_URL" -f <path/to/deferred_schedule_migration.sql>

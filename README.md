@@ -127,6 +127,16 @@ cp .env.example .env
 The env file is authoritative over your shell environment. If you have a conflicting variable
 already exported, sbshift warns you. Use `--no-env-file` to skip the env file entirely.
 
+All commands accept these global options:
+
+| Option | Default | Description |
+|---|---|---|
+| `-c, --config <path>` | `migrate.config.yaml` | Path to the config file |
+| `--env-file <path>` | `.env` if present | Secrets file to load (authoritative over inherited env) |
+| `--no-env-file` | off | Skip loading any env file; use inherited environment as-is |
+| `--log-file <path>` | `logs/sbshift-<command>-<timestamp>.log` | Mirror all logs to this file (survives terminal/SSH loss) |
+| `--no-log-file` | off | Disable the log file (terminal only) |
+
 | Variable | Where to find it (Supabase Dashboard) | Required for | Example |
 |---|---|---|---|
 | `SOURCE_DB_URL` | Project Settings -> Database -> Connection string -> URI (use the **direct** host, not pooler) | Everything | `postgresql://postgres:password@db.<ref>.supabase.co:5432/postgres` |
@@ -399,8 +409,8 @@ bun start -c migrate.sandbox.yaml doctor
 bun start -c migrate.sandbox.yaml bootstrap --confirm
 bun start -c migrate.sandbox.yaml replicate
 bun start -c migrate.sandbox.yaml watch
-bun start -c migrate.sandbox.yaml cutover
 bun start -c migrate.sandbox.yaml reconcile
+bun start -c migrate.sandbox.yaml cutover
 bun start -c migrate.sandbox.yaml teardown
 
 # When done: delete both projects
@@ -888,7 +898,7 @@ database. Before that:
 
 ### Where logs are written
 
-- All commands write a log file to `logs/<command>-<timestamp>.log` in the repo directory.
+- All commands write a log file to `logs/<command>-<timestamp>.log` in the repo directory (override with `--log-file <path>`, disable with `--no-log-file`).
 - The `reconcile` report writes to `ledger/reconcile-<timestamp>.json`.
 - The `verify` report (with `--json`) writes to the configured `--out-dir` (default: `ledger/`).
 - Error output goes to stderr. Use `--json` on `run`, `status`, `verify`, `translate` to get
