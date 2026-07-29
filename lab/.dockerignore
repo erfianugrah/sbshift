@@ -1,0 +1,4 @@
+*
+!Dockerfile.pgupgrade
+!Dockerfile.pgupgrade-supabase
+!.dockerignore

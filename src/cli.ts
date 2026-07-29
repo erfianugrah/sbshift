@@ -7,6 +7,8 @@ import {
   loadConfig,
   loadSecrets,
   loadToken,
+  nonEmptyEnv,
+  SecretsSchema,
   supabaseSourceRef,
 } from "./config.ts";
 import { connect, type Db } from "./db.ts";
@@ -33,6 +35,11 @@ import { sandboxDown, sandboxStatus, sandboxUp } from "./steps/sandbox.ts";
 import { printStatus, status } from "./steps/status.ts";
 import { renderTranslate, signOffSchema, translate } from "./steps/translate.ts";
 import { type FailOn, verify } from "./steps/verify.ts";
+import { upgradeCapture } from "./upgrade/capture.ts";
+import { upgradeDoctor } from "./upgrade/doctor.ts";
+import { upgradeLab } from "./upgrade/lab.ts";
+import { connectSourceOnly, resolveSourceUrl } from "./upgrade/source.ts";
+import { upgradeVerify } from "./upgrade/verify.ts";
 
 const { version } = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
@@ -613,6 +620,165 @@ sandbox
   .action(async () => {
     await sandboxDown(new MgmtApi(loadToken()));
   });
+
+/**
+ * `upgrade` command group - PG major-version upgrade rehearsal (pg_upgrade path).
+ * Registered THREE ways by design: top-level `upgrade`, top-level alias
+ * `pgupgrade`, and nested under the rehearsal rig as `rehearse upgrade`.
+ * Unlike the migration pipeline, these commands need NO migrate.config.yaml -
+ * everything comes from flags + SOURCE/TARGET_DB_URL env.
+ */
+function registerUpgradeGroup(parent: Command, alias?: string): void {
+  const g = parent
+    .command("upgrade")
+    .description(
+      "PG major-version upgrade rehearsal: doctor | capture | lab | verify (pg_upgrade path)",
+    );
+  if (alias) g.alias(alias);
+
+  g.command("doctor")
+    .description(
+      "read-only major-upgrade readiness audit of the source (extensions, blockers, downtime estimate)",
+    )
+    .option("--to <major>", "target Postgres major version", "17")
+    .option("--db-url <url>", "source connection string (default: SOURCE_DB_URL)")
+    .option("--copy-mbps <n>", "assumed disk copy throughput for the downtime estimate", "100")
+    .option("--fixed-overhead-sec <n>", "assumed fixed platform overhead (seconds)", "900")
+    .action(async (o) => {
+      const sourceUrl = resolveSourceUrl(o.dbUrl);
+      const db = connectSourceOnly(sourceUrl);
+      try {
+        const r = await upgradeDoctor(db, {
+          to: Number(o.to),
+          sourceUrl,
+          copyMbps: Number(o.copyMbps),
+          fixedOverheadSec: Number(o.fixedOverheadSec),
+        });
+        if (r.fail > 0) process.exitCode = 1;
+      } catch (e) {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      } finally {
+        await db.end({ timeout: 5 });
+      }
+    });
+
+  g.command("capture")
+    .description(
+      "dump roles + schema + data of the source into a local dir (input for `upgrade lab`)",
+    )
+    .option("--db-url <url>", "source connection string (default: SOURCE_DB_URL)")
+    .option("--out-dir <path>", "capture output directory", "capture")
+    .option("--max-gb <n>", "refuse to capture above this size unless --force", "10")
+    .option("--force", "capture even above --max-gb", false)
+    .option(
+      "--all-schemas",
+      "include Supabase-managed schemas (auth/storage/...) in the dumps",
+      false,
+    )
+    .option(
+      "--with-auth-data",
+      "also dump the auth schema row data separately (deferred-FK restore)",
+      false,
+    )
+    .action(async (o) => {
+      const url = resolveSourceUrl(o.dbUrl);
+      const db = connectSourceOnly(url);
+      try {
+        const r = await upgradeCapture(db, url, {
+          outDir: o.outDir,
+          maxCaptureGb: Number(o.maxGb),
+          force: Boolean(o.force),
+          allSchemas: Boolean(o.allSchemas),
+          withAuthData: Boolean(o.withAuthData),
+        });
+        if (!r.ok) process.exitCode = 1;
+      } catch (e) {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      } finally {
+        await db.end({ timeout: 5 });
+      }
+    });
+
+  g.command("lab")
+    .description(
+      "Docker lab: time a real `pg_upgrade --link` N times on production-like data " +
+        "(--capture-dir from `upgrade capture`, or --seed-gib for fixture+seed)",
+    )
+    .option("--from <major>", "source Postgres major version", "15")
+    .option("--to <major>", "target Postgres major version", "17")
+    .option("--runs <n>", "pg_upgrade timing runs", "3")
+    .option("--capture-dir <path>", "capture directory from `upgrade capture`")
+    .option("--seed-gib <n>", "fixture + size-targeted seed instead of a capture (GiB)")
+    .option(
+      "--image <flavor>",
+      "lab image flavor: auto | pgdg | supabase (auto = supabase for Supabase captures)",
+      "auto",
+    )
+    .option("--from-image <ref>", "supabase/postgres image for the old major (supabase flavor)")
+    .option("--to-image <ref>", "supabase/postgres image for the new major (supabase flavor)")
+    .option("--prod-bytes <n>", "production DB size in bytes (extrapolated downtime estimate)")
+    .option("--keep", "keep lab containers running afterwards (for `upgrade verify`)", false)
+    .option("--clean", "tear down the lab containers and exit", false)
+    .option("--work-dir <path>", "lab scratch directory (dumps, report)", ".upgrade-lab")
+    .action(async (o) => {
+      try {
+        await upgradeLab({
+          from: Number(o.from),
+          to: Number(o.to),
+          runs: Number(o.runs),
+          captureDir: o.captureDir,
+          seedGib: o.seedGib ? Number(o.seedGib) : undefined,
+          image: o.image,
+          fromImage: o.fromImage,
+          toImage: o.toImage,
+          prodBytes: o.prodBytes ? Number(o.prodBytes) : undefined,
+          keep: Boolean(o.keep),
+          clean: Boolean(o.clean),
+          workDir: o.workDir,
+        });
+      } catch (e) {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      }
+    });
+
+  g.command("verify")
+    .description(
+      "prove the upgraded cluster is data-identical: chunked-checksum reconcile " +
+        "(SOURCE_DB_URL = pre-upgrade copy, TARGET_DB_URL = upgraded cluster)",
+    )
+    .option("--include-managed", "also diff Supabase-managed schemas (auth/storage/...)", false)
+    .option("--out-dir <path>", "directory for the reconcile JSON report", "ledger")
+    .option("--max-examples <n>", "max divergent rows to report per table", "20")
+    .action(async (o) => {
+      // Deliberately NOT loadSecrets(): upgrade verify needs exactly two DB
+      // URLs. A stale/placeholder SOURCE_REPLICATION_URL or PAT in the
+      // inherited env / auto-loaded .env must not block a lab verify.
+      // Use nonEmptyEnv so SOURCE_DB_URL='' errors as 'Required'.
+      const pair = SecretsSchema.pick({ SOURCE_DB_URL: true, TARGET_DB_URL: true }).parse(
+        nonEmptyEnv(process.env),
+      );
+      const { source, target, close } = connect(pair);
+      try {
+        const ok = await upgradeVerify(source, target, {
+          includeManaged: Boolean(o.includeManaged),
+          outDir: o.outDir,
+          maxExamples: Number(o.maxExamples),
+        });
+        if (!ok) process.exitCode = 1;
+      } catch (e) {
+        log.err(e instanceof Error ? e.message : String(e));
+        process.exitCode = 1;
+      } finally {
+        await close();
+      }
+    });
+}
+
+registerUpgradeGroup(program, "pgupgrade");
+registerUpgradeGroup(rehearse);
 
 program
   .parseAsync()

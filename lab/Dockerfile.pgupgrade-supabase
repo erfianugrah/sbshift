@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+# Dual-major lab image built from the REAL supabase/postgres images, so the
+# platform extension set (pgjwt, pg_net, pg_graphql, supabase_vault, ...) has
+# binaries on BOTH majors - unlike the plain-PGDG lab, restores need no
+# extension stripping and pg_upgrade --check exercises the exact
+# extension-availability behavior the managed upgrade will hit.
+#
+# The images are nix-based: /usr/lib/postgresql/bin symlinks into a
+# content-addressed /nix/store. Nix store paths are absolute and unique per
+# package version, so the whole store from the new-major image drops into the
+# old-major base without conflicts. The new-major bindir is the store path
+# itself (the /nix/var/nix/profiles symlink farm stays the OLD major's).
+ARG FROM_IMAGE=public.ecr.aws/supabase/postgres:15.8.1.085
+ARG TO_IMAGE=public.ecr.aws/supabase/postgres:17.6.1.140
+FROM ${TO_IMAGE} AS pnew
+FROM ${FROM_IMAGE}
+ARG TO_MAJOR=17
+COPY --from=pnew /nix/store /nix/store
+# Pin the new-major bindir for the lab driver (there may be multiple
+# postgresql-and-plugins store paths; pick the newest by mtime).
+RUN set -eu; \
+    ls -dt /nix/store/*-postgresql-and-plugins-${TO_MAJOR}.*/bin | head -1 > /pg-new-bindir.txt; \
+    test -x "$(cat /pg-new-bindir.txt)/initdb"; \
+    mkdir -p /pgdata; \
+    chown -R postgres:postgres /pgdata
+ENTRYPOINT []
+CMD ["sleep", "infinity"]

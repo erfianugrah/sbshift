@@ -7,6 +7,7 @@ import {
   extensionRiskNote,
   externalDeps,
   type Fk,
+  parsePgMajor,
   providerHint,
   providerNotes,
 } from "../src/steps/doctor.ts";
@@ -377,5 +378,34 @@ describe("extensionRiskNote - known extension-update-path risk callouts", () => 
 
   test("unknown extension -> undefined (no false alarm)", () => {
     expect(extensionRiskNote("hypopg")).toBeUndefined();
+  });
+});
+
+describe("parsePgMajor", () => {
+  test("dotted version string -> major number", () => {
+    expect(parsePgMajor("15.8")).toBe(15);
+    expect(parsePgMajor("17.6.1.140")).toBe(17);
+  });
+
+  test("server_version_num style 6-digit", () => {
+    expect(parsePgMajor("160002")).toBe(16);
+  });
+
+  test("server_version_num style 5-digit (PG9)", () => {
+    expect(parsePgMajor("90618")).toBe(9);
+  });
+
+  test("full banner string -> major", () => {
+    expect(parsePgMajor("PostgreSQL 15.8 (Debian 15.8-1.pgdg24.04+1) on x86_64-pc-linux-gnu")).toBe(
+      15,
+    );
+  });
+
+  test("empty/blank -> null", () => {
+    expect(parsePgMajor("")).toBeNull();
+  });
+
+  test("unparseable garbage -> null", () => {
+    expect(parsePgMajor("not-a-version")).toBeNull();
   });
 });

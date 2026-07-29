@@ -297,8 +297,25 @@ export function loadToken(): string {
   return tok;
 }
 
+/**
+ * Filter an env-like record to exclude empty-string values. For dotenv files
+ * and shell exports where `KEY=` means "unset", not "empty string". Required
+ * fields with an empty string still fail parse with a 'Required' message
+ * instead of a misleading 'Invalid URL'.
+ */
+export function nonEmptyEnv(
+  env: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  return Object.fromEntries(Object.entries(env).filter(([, v]) => v !== ""));
+}
+
 export function loadSecrets(requireToken = false): Secrets {
-  const parsed = SecretsSchema.safeParse(process.env);
+  // Drop empty-string vars before parsing: dotenv files and shell exports
+  // commonly carry `SOME_URL=` placeholders, and for OPTIONAL fields an empty
+  // string must mean "unset", not "invalid URL". Required fields still fail
+  // (with a clearer 'Required' instead of 'Invalid URL').
+  const env = nonEmptyEnv(process.env);
+  const parsed = SecretsSchema.safeParse(env);
   if (!parsed.success) {
     throw new Error(`Missing/invalid environment secrets:\n${z.prettifyError(parsed.error)}`);
   }

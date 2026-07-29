@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   applyEnvFile,
   ConfigSchema,
+  nonEmptyEnv,
   parseEnvFile,
   SecretsSchema,
   supabaseSourceRef,
@@ -172,5 +173,35 @@ describe("applyEnvFile", () => {
     expect(conflicts).toEqual(["SBSHIFT_TEST_A"]);
     expect(process.env.SBSHIFT_TEST_A).toBe("fromfile"); // file won
     for (const k of ["SBSHIFT_TEST_A", "SBSHIFT_TEST_B", "SBSHIFT_TEST_C"]) delete process.env[k];
+  });
+});
+
+describe("nonEmptyEnv", () => {
+  test("empty string values are filtered out (treated as unset)", () => {
+    const env = { SOURCE_DB_URL: "", TARGET_DB_URL: "postgresql://a:b@h:5432/d", KEEP: "val" };
+    const result = nonEmptyEnv(env);
+    expect(result).toEqual({ TARGET_DB_URL: "postgresql://a:b@h:5432/d", KEEP: "val" });
+    expect("SOURCE_DB_URL" in result).toBe(false);
+  });
+
+  test("required field with empty string -> parse fails (Required, not Invalid URL)", () => {
+    const env = nonEmptyEnv({
+      SOURCE_DB_URL: "",
+      TARGET_DB_URL: "postgresql://a:b@h:5432/d",
+    });
+    const r = SecretsSchema.safeParse(env);
+    expect(r.success).toBe(false);
+  });
+
+  test("all values present -> unchanged", () => {
+    const env = { SOURCE_DB_URL: "pg://s", TARGET_DB_URL: "pg://t" };
+    expect(nonEmptyEnv(env)).toEqual(env);
+  });
+
+  test("undefined values are preserved", () => {
+    const env: Record<string, string | undefined> = { FOO: undefined, BAR: "val" };
+    const result = nonEmptyEnv(env);
+    expect(result.FOO).toBe(undefined);
+    expect(result.BAR).toBe("val");
   });
 });

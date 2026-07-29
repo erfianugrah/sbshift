@@ -196,6 +196,40 @@ export interface DoctorReport {
   fail: number;
 }
 
+/**
+ * Parse a Postgres server version string into the integer major version.
+ * Accepts both "15.8" (SHOW server_version) and "150008" (SHOW server_version_num).
+ * Returns null if unparseable.
+ */
+export function parsePgMajor(ver: string): number | null {
+  if (!ver) return null;
+  // server_version_num style: 150008 -> 15
+  if (/^\d{5,6}$/.test(ver)) {
+    return Math.floor(Number(ver) / 10_000);
+  }
+  // "15.8" or "PostgreSQL 15.8 (Debian ...)" style
+  const m = ver.match(/(\d+)\.\d+/);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Derive the local pg_dump major version by shelling out. Returns null when
+ * pg_dump is not on PATH. Called once per doctor invocation. Pure parse
+ * companion -- exported for unit tests.
+ */
+export function guessLocalPgDumpMajor(): number | null {
+  try {
+    const proc = Bun.spawnSync(["pg_dump", "--version"], { stdout: "pipe", stderr: "pipe" });
+    if (proc.exitCode !== 0) return null;
+    const out = new TextDecoder().decode(proc.stdout).trim();
+    // "pg_dump (PostgreSQL) 15.8" or "pg_dump (PostgreSQL) 16.2 (Debian ...)"
+    const m = out.match(/pg_dump \(PostgreSQL\) (\d+)\.\d+/);
+    return m ? Number(m[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function doctor(
   cfg: Config,
   secrets: Secrets,
@@ -482,12 +516,94 @@ async function sourceChecks(source: Db, cfg: Config, s: Sink): Promise<void> {
   // the night before cutover.
   await checkForeignReplicationSlots(source, cfg, s);
 
-  // row counts (informational — drives copy-time + WAL expectations)
+  // row counts (informational -- drives copy-time + WAL expectations)
   for (const qt of cfg.replication.tables) {
     const [schema, table] = qt.split(".");
     const [c] = await source`
       SELECT n_live_tup FROM pg_stat_user_tables WHERE schemaname = ${schema ?? ""} AND relname = ${table ?? ""}`;
     log.detail(`${qt}: ~${c?.n_live_tup ?? "?"} live rows`);
+  }
+
+  // -- STORED generated columns: recomputed per-row by the subscriber during
+  //    the initial copy, which is the measured throughput killer (~7x slower
+  //    with a STORED tsvector -- ~11 MiB/s vs ~80 MiB/s). Warn so the
+  //    migration time estimate accounts for them.
+  for (const qt of cfg.replication.tables) {
+    const [schema, table] = qt.split(".");
+    const genCols = await source`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = ${schema ?? ""}
+        AND table_name = ${table ?? ""}
+        AND is_generated = 'ALWAYS'`;
+    if (genCols.length > 0) {
+      const names = genCols.map((r) => String(r.column_name)).join(", ");
+      s.warn(
+        `${qt} has STORED generated column(s): ${names}. The subscriber recomputes each row ` +
+          "during the initial copy -- this is the measured throughput killer (~7x slower with a " +
+          "STORED tsvector, ~11 MiB/s vs ~80 MiB/s). The migration time estimate must account for it.",
+      );
+    }
+  }
+
+  // -- pg_cron active jobs: pause at watermark, don't enable on target until cutover
+  try {
+    const cronJobs = await source`
+      SELECT 1 FROM information_schema.schemata WHERE schema_name = 'cron'`;
+    if (cronJobs.length > 0) {
+      const activeJobs = await source`
+        SELECT count(*)::int AS n FROM cron.job WHERE active = true`;
+      if (activeJobs.length > 0 && Number(activeJobs[0]?.n ?? 0) > 0) {
+        s.warn(
+          `pg_cron has ${String((activeJobs[0] as { n: number }).n)} active job(s) in cron.job -- every cron job must be ` +
+            "PAUSED at the migration watermark and must NOT be enabled on the target until cutover. " +
+            "A half-migrated target firing ingestion jobs or outbound pg_net calls is a split-brain / " +
+            "duplicate-action risk.",
+        );
+      }
+    }
+  } catch {
+    // cron schema absent or not accessible -- skip
+  }
+
+  // -- Vault / pgsodium: root key not carried by dump/restore
+  try {
+    const vaultSecrets = await source`
+      SELECT count(*)::int AS n
+      FROM information_schema.schemata
+      WHERE schema_name = 'vault'`;
+    if (vaultSecrets.length > 0) {
+      const hasSecrets = await source`
+        SELECT 1 FROM vault.secrets LIMIT 1`;
+      if (hasSecrets.length > 0) {
+        s.warn(
+          "supabase_vault is installed and vault.secrets is non-empty -- the encryption root key " +
+            "is NOT carried by a manual dump/restore. The root key must be copied from the source " +
+            "while the source is still ACTIVE (once the source is paused/deleted the key, and " +
+            "everything encrypted under it, is unrecoverable). Overwriting a key makes data under " +
+            "a different key inaccessible.",
+        );
+      }
+    }
+  } catch {
+    // vault absent or not accessible -- skip
+  }
+
+  // -- pg_dump client version vs source server major
+  {
+    const [sv] = await source`SHOW server_version`;
+    const srcVer = String(sv?.server_version ?? "");
+    const dumpVer = guessLocalPgDumpMajor();
+    if (dumpVer !== null) {
+      const srcMajor = parsePgMajor(srcVer);
+      if (srcMajor !== null && dumpVer < srcMajor) {
+        s.fail(
+          `local pg_dump client (PG ${dumpVer}) is OLDER than the source server (PG ${srcVer}) -- ` +
+            "this fails with a GSSAPI negotiation error. Install pg_dump >= PG " +
+            `${String(srcMajor)} or run sbshift on a host with a matching client.`,
+        );
+      }
+    }
   }
 }
 
