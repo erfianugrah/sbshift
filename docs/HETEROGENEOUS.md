@@ -167,10 +167,21 @@ The full `DebeziumEngine` lifecycle is built and proven end-to-end against real 
 
 Two CLI surfaces complete the guided path (MVP §5 item 3, DELIVERED 2026-06-24):
 
-- **`sbshift translate`** — drafts target Postgres DDL from the MySQL `information_schema`, writes
+- **`bun start translate`** — drafts target Postgres DDL from the MySQL `information_schema`, writes
   `<out-dir>/target-schema.sql` + `target-schema.decisions.json` (never auto-applies), `--apply`
   to load it, `--sign-off` to ratify. `cutover` refuses to run until the draft is signed off.
-- **`sbshift doctor`** — for a heterogeneous source, runs the MySQL engine-prep playbook **live**:
+
+```bash
+# Draft target Postgres DDL from MySQL information_schema (never auto-applies)
+bun start translate --out-dir ledger
+
+# Apply the drafted DDL to the TARGET
+bun start translate --out-dir ledger --apply
+
+# After human review: sign off the schema so cutover may proceed
+bun start translate --out-dir ledger --sign-off
+```
+- **`bun start doctor`** — for a heterogeneous source, runs the MySQL engine-prep playbook **live**:
   the items carrying a machine-checkable `assert` (grants, binlog ROW+FULL, GTID,
   `binlog_row_value_options`) are judged pass/warn/fail against the real server; retention is a
   live reading to weigh by hand; the schema gate points at `translate`. Target checks drop to
@@ -201,7 +212,7 @@ The SQL Server engine is implemented end-to-end and forks cleanly off `cfg.sourc
 - **schema translation** — `src/engine/sqlserver-schema-translate.ts` (the §7b long pole: full
   T-SQL matrix incl. fractional-second precision cap at 6, DATETIME→timestamp tz review, the
   ROWVERSION trap, IDENTITY + COMPUTED overlays, spatial/`sql_variant` design decisions). Wired
-  into `sbshift translate`.
+  into `bun start translate`.
 - **engine lifecycle** — `DebeziumEngine` replicate/watch/reconcile/cutover/teardown are
   engine-aware: bracket `[schema].[table]` quoting + `LEN`, the sqlserver reconcile dialect, and
   a **CDC-`max_lsn` write-stop gate** (`sys.fn_cdc_get_max_lsn`) in place of the binlog position.

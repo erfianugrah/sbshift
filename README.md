@@ -1,39 +1,916 @@
 # sbshift
 
-Typed CLI orchestrator for **near-zero-downtime Postgres-to-Postgres migration** via native
-logical replication — for the large-database case where a plain dump/restore window is
-unacceptable.
+**Near-zero-downtime Postgres-to-Postgres migration** via native logical replication. Move data
+between two databases while the source stays online. Only the final cutover (seconds to minutes)
+requires stopping writes.
 
-The engine — `replicate → watch → reconcile → cutover → teardown` — is **generic Postgres**
-(publication + slot + subscription, catalog-driven monitoring, checksum reconciliation,
-lag-drain + sequence resync). It works for any PG15+ → PG15+ pair: Supabase↔Supabase (any
-region, or same region for a tier change / project split), self-hosted↔Supabase, or
-self-hosted↔self-hosted. When both ends are Supabase, **optional** commands wrap the official
-`supabase` CLI + Management API for the non-replicated pieces (schema dump, storage, edge
-functions, project config) instead of reimplementing them; they no-op or are skippable for
-non-Supabase migrations.
+Works for any PG15+ -> PG15+ pair: Supabase to Supabase (cross-region, same-region tier change,
+project split), self-hosted to Supabase, or self-hosted to self-hosted.
 
-It owns the one piece nothing else automates: the **data-replication state machine +
-reconciliation + WAL watchdog**.
+---
 
-## Migration paths & maturity
+## Which path should I use?
 
-sbshift has one control plane (`doctor → bootstrap → replicate → watch → reconcile → cutover →
-verify → teardown`) behind a `ReplicationEngine` seam, with one engine per source database. Read
-this table first — **the maturity differs sharply by source**:
+sbshift has **three separate workflows**. Your goal determines which one to follow.
 
-| Source → target | Engine | Maturity | What backs the claim |
+| If you want to... | Use this path | Commands (in order) |
+|---|---|---|
+| **Move data between two databases** with minimal downtime (cross-region move, project split, self-hosted to Supabase) | **A -- Migration** | `doctor -> bootstrap -> replicate -> watch -> reconcile -> cutover -> verify -> teardown` |
+| **Practice a migration** or test the pipeline on throwaway projects | **B -- Sandbox / Rehearsal** | `sandbox up -> doctor -> bootstrap -> replicate -> watch -> reconcile -> cutover -> sandbox down` |
+| **Rehearse a Postgres major-version upgrade** (e.g. PG 15 to 17 using `pg_upgrade`) | **C -- Upgrade rehearsal** | `upgrade doctor -> upgrade capture -> upgrade lab -> upgrade verify` |
+
+**Path A** streams row data via logical replication while the source stays online. You stop writes
+only for the final cutover (seconds to minutes). This is the main use case.
+
+**Path B** creates temporary Supabase projects, seeds data, runs the full pipeline, then deletes
+everything. Use it to learn the tool without risk.
+
+**Path C** audits your database for upgrade blockers, dumps a copy, times a real `pg_upgrade` in
+Docker, and proves the upgraded copy is data-identical. No database migration -- just rehearsal.
+
+> **Migrating from MySQL or SQL Server to Postgres?** See [`docs/HETEROGENEOUS.md`](docs/HETEROGENEOUS.md)
+> and [`docs/GUIDED-MIGRATION.md`](docs/GUIDED-MIGRATION.md). Those use a different engine (Debezium
+> CDC) and need schema translation. The rest of this README covers the Postgres -> Postgres path.
+
+---
+
+## Prerequisites
+
+Install these **before** you start. Each has a check command to verify it is ready.
+
+### 1. Bun (runs the CLI)
+
+```bash
+bun --version
+```
+
+**Expected:** `1.3.x` or higher.
+
+If you don't have Bun: `curl -fsSL https://bun.sh/install | bash`
+
+### 2. Docker (for sandbox, upgrade lab, and rehearsal tests)
+
+```bash
+docker --version
+docker compose version
+```
+
+**Expected:** Docker `24.x` or higher, compose `v2.x` or higher.
+
+### 3. Postgres client tools (pg_dump, psql)
+
+```bash
+pg_dump --version
+psql --version
+```
+
+**Expected:** `15.x` or higher. The local major version must be >= the source server's major
+version. If the local version is older, you will get a `GSSAPI negotiation error` when `bootstrap`
+tries to dump the schema.
+
+**If you see that error:** Install a newer postgres client. On macOS:
+`brew install postgresql@17`. On Debian/Ubuntu: `apt install postgresql-client-17`.
+
+### 4. Network reachability (the IPv6 trap)
+
+Logical replication needs a **direct connection** to the database host, NOT the connection pooler.
+The direct host (`db.<ref>.supabase.co:5432`) is **IPv6-only** unless the project has the
+[IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address).
+
+```bash
+# Test if your machine can reach the direct host (replace <ref> with your project ref)
+ping -c 1 db.<your-project-ref>.supabase.co
+```
+
+**If this fails**, your machine has no IPv6 route to the direct host. You have three options:
+
+- **Option A (recommended):** Run sbshift from an IPv6-capable host -- a small VM in the
+  target region. Clone the repo there, `bun install`, and run the commands.
+- **Option B (small cost, ~$6/mo):** Enable the IPv4 add-on on the source project. The
+  direct host then resolves to IPv4.
+- **Option C (last resort):** Keep `SOURCE_DB_URL` on the pooler for admin queries and set
+  `SOURCE_REPLICATION_URL` to the source direct host. The pooler does NOT carry WAL --
+  replication still goes direct. The `doctor` command validates this split.
+
+### 5. Supabase Access Token (optional -- for Supabase-specific commands)
+
+Only needed if you use `provision`, `config-sync`, `sandbox`, `functions`, or `storage`.
+
+```bash
+echo $SUPABASE_ACCESS_TOKEN
+```
+
+**Expected:** `sbp_<long string>`. Find it at:
+[Supabase Dashboard -> Account -> Access Tokens](https://supabase.com/dashboard/account/tokens)
+Create one with scope `All` (or at minimum `Projects: read/write` and `Orgs: read`).
+
+---
+
+## Setup
+
+### Clone and install
+
+```bash
+git clone https://github.com/erfianugrah/sbshift.git
+cd sbshift
+bun install
+```
+
+### Environment variables
+
+Copy the example env file and fill in your values. **Every value is a secret -- never commit it.**
+
+```bash
+cp .env.example .env
+```
+
+The env file is authoritative over your shell environment. If you have a conflicting variable
+already exported, sbshift warns you. Use `--no-env-file` to skip the env file entirely.
+
+| Variable | Where to find it (Supabase Dashboard) | Required for | Example |
 |---|---|---|---|
-| **Postgres → Postgres / Supabase** | native logical replication | **Stable — production-usable** | End-to-end in CI every push: real logical replication on a throwaway PG pair, real `pg_dump`/`pg_dumpall`/`psql` bootstrap, and negative-path safety gates that **must fire** (concurrent-write reconcile, WAL-bloat watchdog abort, cutover-refuses-under-writes). Byte-exact `row::text` checksum reconcile. |
-| **MySQL → Postgres** | Debezium CDC (no Kafka) | **Beta — runnable with eyes open** | Full `DebeziumEngine` lifecycle + the guided `translate` schema gate + live `doctor` engine-prep checks, **harness-verified** against real Debezium 3.6.0.CR1 + MySQL 8.2 + Postgres 16. Caveats are loud, not hidden: reconcile is **downgraded** to count + portable aggregates (no byte-exact hash); Debezium is pinned to a **pre-release**; schema translation never auto-applies (cutover gated on human sign-off). |
-| **SQL Server / Azure SQL → Postgres** | Debezium CDC (no Kafka) | **Beta — runnable with eyes open** | Full lifecycle + T-SQL schema translator + CDC `max_lsn` write-stop gate + live `doctor` CDC checks, **harness-verified in CI** against real SQL Server 2022 (Developer, CDC) + Debezium 3.6.0.CR1 + Postgres 16 (seed → translate → snapshot → CDC → reconcile → watch → cutover → teardown). Same downgraded-reconcile + pre-release-Debezium + sign-off-gated caveats as MySQL. A retention watchdog in `watch` (CDC cleanup / binlog expiry headroom) warns + aborts before the source purges unconsumed change rows, and a live `doctor` Azure SQL DTU/vCore tier gate fails early on Basic/S0-S2. |
+| `SOURCE_DB_URL` | Project Settings -> Database -> Connection string -> URI (use the **direct** host, not pooler) | Everything | `postgresql://postgres:password@db.<ref>.supabase.co:5432/postgres` |
+| `TARGET_DB_URL` | Same as above, for the target project | Everything | `postgresql://postgres:password@db.<ref>.supabase.co:5432/postgres` |
+| `SOURCE_REPLICATION_URL` | Same as SOURCE_DB_URL but always the **direct** host | Only if you use the pooler split (Option C above) | `postgresql://postgres:password@db.<ref>.supabase.co:5432/postgres` |
+| `SUPABASE_ACCESS_TOKEN` | [Account -> Access Tokens](https://supabase.com/dashboard/account/tokens) | `provision`, `config-sync`, `sandbox`, `functions`, `storage` | `sbp_abc123...` |
 
-The **MySQL** and **SQL Server** engines are heterogeneous (different source DB, not Postgres);
-their design + the per-engine source-prep playbooks live in
-[`docs/HETEROGENEOUS.md`](docs/HETEROGENEOUS.md) and [`docs/GUIDED-MIGRATION.md`](docs/GUIDED-MIGRATION.md).
-The rest of this README documents the **Postgres → Postgres / Supabase** path (the stable one); the
-command vocabulary (`doctor`, `replicate`, `watch`, `reconcile`, `cutover`, `teardown`) is identical
-across engines, with `translate` added for the heterogeneous schema-translation gate.
+**Leave empty (unset) any variable you don't need.** Empty string means "not used."
+
+### Config file
+
+```bash
+cp migrate.config.example.yaml migrate.config.yaml
+# Edit migrate.config.yaml with your project refs and table list
+```
+
+Here is an annotated example:
+
+```yaml
+# migrate.config.yaml -- list the tables you want to replicate
+source:
+  ref: abcdefghijklmnopqrst   # your source Supabase project ref (from the dashboard URL)
+  host: db.abcdefghijklmnopqrst.supabase.co  # direct host, not pooler
+tables:
+  - public.users              # schema.table -- one per line
+  - public.orders
+  - public.order_items
+
+# Optional: change default names
+# replication:
+#   publication: sbshift_pub
+#   slot: sbshift_slot
+#   subscription: sbshift_sub
+
+# Optional: only if you want to copy non-database config
+# configSync:
+#   secrets: true             # copy SMTP/OAuth/SMS secrets (default: false)
+#   projectSecrets: true      # copy Edge Function env vars (default: false)
+
+# Optional: billable infra to match
+# provision:
+#   compute: micro            # target compute size
+#   disk: 16                  # target disk size in GB
+```
+
+---
+
+## Quick Start A -- Near-zero-downtime migration
+
+This walks you through the full pipeline. Run each command in order. Read the output before
+proceeding to the next step. All commands use `bun start <command>`.
+
+### Step 0: Readiness check (read-only)
+
+```bash
+bun start doctor --source-only
+```
+
+**What it does:** Checks the source database for readiness: connection shape (pooler vs direct),
+WAL level, replica identity, extension versions, cross-schema foreign keys, and any custom
+Postgres config that won't be replicated. Exit code 0 = pass, 1 = fail.
+
+**Expected output (pass):**
+```
+✓ SOURCE wal_level = logical
+✓ SOURCE has replica identity
+✓ Doctor pass: READY (with warnings)
+```
+
+**Expected output (fail):**
+```
+✗ SOURCE wal_level = replica (needs logical)
+✗ NOT READY -- fix the issues above, then re-run
+```
+
+**If you see NOT READY:** Fix the reported issues and re-run `doctor` before continuing.
+
+### Step 1: Load schema, roles, and extensions onto the target
+
+```bash
+# Preview what will be done (read-only)
+bun start bootstrap
+```
+
+**What it does:** Shows a preview of the extensions, roles, and schema that will be created on
+the target. No changes are made yet.
+
+```bash
+# Apply the changes (this mutates the target)
+bun start bootstrap --confirm
+```
+
+**What it does:** Enables missing extensions on the target, restores database roles (without
+passwords -- passwords must be set manually), and restores the schema. For Supabase sources, it
+automatically excludes the ~27 managed schemas (`auth`, `storage`, `extensions`, etc.) that
+already exist on every Supabase project.
+
+**If you have tables that reference `auth.users`** (a foreign key from your table into the
+auth schema), you must also load auth data onto the target before the next step:
+
+```bash
+# ONLY if you have cross-schema FKs into auth.users (doctor will tell you)
+bun start bootstrap --confirm --with-auth-data
+```
+
+### Step 2: Stand up replication
+
+```bash
+bun start replicate
+```
+
+**What it does:** Creates a publication (what to replicate) on the source, a replication slot
+(where to read WAL from) on the source, and a subscription (where to apply the data) on the
+target. This starts the initial copy of all existing data.
+
+### Step 3: Watch the initial sync
+
+```bash
+bun start watch
+```
+
+**What it does:** Polls the replication status every few seconds and shows:
+- Which tables are still copying (percentage done)
+- Which tables are ready (fully synced)
+- The WAL size being retained by the replication slot (the watchdog aborts if it grows too large)
+
+**Expected output:**
+```
+public.users           copying   42%  (1.2 GB / 2.8 GB)
+public.orders          ready     --    (all rows copied)
+public.order_items     ready     --    (all rows copied)
+WAL retained: 1.8 GB  (watchdog limit: 50 GB)
+```
+
+Let `watch` run until all tables show `ready`. For large databases, this can take hours.
+
+### Step 4: Stop writes to the source
+
+**This is the only moment of downtime.** Put your application in read-only mode or take it
+down. Do NOT skip this step -- the cutover will fail if writes are still flowing.
+
+### Step 5: Reconcile (checksum verification)
+
+**Run this AFTER you have stopped writes** (Step 4), otherwise in-flight rows will show as
+spurious diffs.
+
+```bash
+bun start reconcile
+```
+
+**What it does:** Compares row data between source and target using chunked checksums (256
+buckets by default). If any rows differ, it reports the exact divergent rows.
+
+**Expected output (pass):**
+```
+RECONCILE PASSED -- all 256 buckets match
+```
+
+**Expected output (fail):**
+```
+RECONCILE FAILED -- 1 bucket mismatch
+  Table public.users: row id=42 missing_on_target
+```
+
+**If reconcile fails:** Do NOT proceed to cutover. Investigate the mismatch. You can restart
+writes on the source, tear down replication with `teardown`, and fix the issue.
+
+### Step 6: Cutover (drain lag, resync sequences, drop subscription)
+
+```bash
+bun start cutover
+```
+
+**What it does:**
+1. Drains remaining replication lag to 0 (waits up to 300 seconds by default)
+2. Verifies writes are actually stopped (samples WAL position twice)
+3. Resyncs sequence values (serial/IDENTITY columns) so new inserts don't collide
+4. Drops the subscription (replication stops permanently)
+
+**Expected output:**
+```
+Lag: 0 bytes (drained)
+Writes stopped: confirmed (WAL not advancing)
+✓ Sequences resynced: 3
+✓ Subscription dropped
+✓ CUTOVER COMPLETE
+```
+
+**If the cutover fails** (lag won't drain because writes are still happening):
+```
+✗ Lag did not drain -- WAL is still advancing
+  Writes may not be stopped. Check your application.
+```
+
+**If you need more time for lag to drain:**
+```bash
+bun start cutover --max-lag-wait 600
+```
+
+**After cutover completes:**
+- Repoint your application to the target database (change the connection string)
+- Add any cron jobs on the target now
+- Re-enable scheduled jobs that were paused
+
+### Step 7: Copy non-database config (Supabase only)
+
+```bash
+# Preview what will be copied (read-only)
+bun start config-sync --dry-run
+
+# Apply the changes
+bun start config-sync
+```
+
+**What it does:** Copies project configuration (Auth settings, Realtime settings, PostgREST
+settings, Storage settings, pooler config) via the Supabase Management API. Secrets (SMTP
+passwords, OAuth client secrets) are NOT copied by default.
+
+**The JWT signing secret + API keys are NEVER copied.** New project = new keys by design.
+Existing user sessions will invalidate and users will need to re-login.
+
+### Step 8: Match billable infra (optional, Supabase only)
+
+```bash
+# Preview what will be changed (read-only)
+bun start provision
+
+# Apply the changes (this changes the bill!)
+bun start provision --confirm
+```
+
+**What it does:** Adjusts the target project's compute size, disk size, PITR (Point-In-Time
+Recovery), IPv4 add-on, and backup schedule to match the source. This is a **billable** change.
+
+### Step 9: Post-migration health check
+
+```bash
+bun start verify
+```
+
+**What it does:** Runs Supabase advisors on the target (RLS policies, primary keys, performance
+lints) and fails if any issues are found. Exit 0 = healthy, exit 1 = issues found.
+
+### Step 10: Tear down replication objects
+
+```bash
+bun start teardown
+```
+
+**What it does:** Safely drops the subscription, slot, and publication in the correct order.
+Idempotent -- safe to run even if some objects were already dropped.
+
+---
+
+## Quick Start B -- Sandbox (practice on throwaway projects)
+
+Use this to practice the full pipeline without touching real data. It creates temporary Supabase
+projects, runs the pipeline, then deletes everything.
+
+```bash
+# Create a throwaway source+target pair, seed data, write config files
+bun start sandbox up --org <your-org-id>
+
+# Check the sandbox status (shows the config files to use)
+bun start sandbox status
+
+# Now run the pipeline using the sandbox config files:
+# (the sandbox up command prints the exact commands)
+bun start -c migrate.sandbox.yaml doctor
+bun start -c migrate.sandbox.yaml bootstrap --confirm
+bun start -c migrate.sandbox.yaml replicate
+bun start -c migrate.sandbox.yaml watch
+bun start -c migrate.sandbox.yaml cutover
+bun start -c migrate.sandbox.yaml reconcile
+bun start -c migrate.sandbox.yaml teardown
+
+# When done: delete both projects
+bun start sandbox down
+```
+
+---
+
+## Quick Start C -- Postgres major-version upgrade rehearsal
+
+This is a **separate workflow** from the migration pipeline. Use it when you want to rehearse a
+Postgres in-place major-version upgrade (e.g. PG 15 to 17) on production-like data before running
+the real upgrade. No `migrate.config.yaml` is needed -- flags and env vars only.
+
+### Step C1: Upgrade doctor (readiness audit)
+
+```bash
+SOURCE_DB_URL="postgresql://postgres:password@db.<ref>.supabase.co:5432/postgres" \
+  bun start upgrade doctor --to 17
+```
+
+**What it does:** Read-only audit of the source. Checks for:
+- Extensions deprecated on the target major version
+- `reg*` columns referencing system OIDs
+- Logical replication slots (foreign slots that could hold WAL)
+- Roles using `md5` password encryption (may fail to connect after upgrade)
+- Estimated downtime based on database size
+
+**Expected output:**
+```
+✓ No deprecated extensions found
+✓ No foreign replication slots
+✗ 2 roles use md5 passwords (will fail to connect after upgrade)
+  -> Fix: ALTER ROLE <name> WITH PASSWORD 'newpassword';
+✓ DB size: 2.8 GB -> estimated downtime: ~15 min (fixed overhead) + ~30 sec (copy)
+```
+
+**Exit code:** 0 = pass (no hard blockers), 1 = at least one hard blocker found.
+
+### Step C2: Upgrade capture (dump the source)
+
+```bash
+SOURCE_DB_URL="postgresql://postgres:password@db.<ref>.supabase.co:5432/postgres" \
+  bun start upgrade capture --out-dir capture --max-gb 10
+```
+
+**What it does:** Dumps roles, schema, and data into a local directory (`capture/`). Creates a
+`manifest.json` with version, size, and extension inventory. Refuses to capture if the database
+is larger than `--max-gb` (10 GB default) unless `--force` is used.
+
+**For Supabase sources with auth data:**
+```bash
+SOURCE_DB_URL="postgresql://..." \
+  bun start upgrade capture --out-dir capture --with-auth-data
+```
+
+**Expected output:**
+```
+✓ Capture complete: 2.8 GB, 3 extensions, 27 tables
+  Manifest: capture/manifest.json
+```
+
+### Step C3: Upgrade lab (time a real pg_upgrade in Docker)
+
+**Option 1: With real captured data:**
+```bash
+bun start upgrade lab --capture-dir capture --runs 3 --keep
+```
+
+**Option 2: Without real data (seed a fixture instead):**
+```bash
+bun start upgrade lab --seed-gib 0.5 --runs 3
+```
+
+**What it does:** Starts two Docker containers (old version and new version), restores the
+captured data (or seeds a fixture), snapshots the old data directory, runs `pg_upgrade --link`
+N times (fresh snapshot copy per run), and runs post-upgrade `ANALYZE`. Emits a timing report.
+
+**Expected output:**
+```
+Run 1: 3.6s  (pg_upgrade --link)
+Run 2: 3.8s  (pg_upgrade --link)
+Run 3: 3.7s  (pg_upgrade --link)
+Average: 3.7s
+```
+
+**With `--keep`:** Leaves both containers running so you can run `upgrade verify` next.
+**With `--prod-bytes`:** Extrapolates the production downtime window:
+```bash
+bun start upgrade lab --capture-dir capture --runs 3 --keep --prod-bytes 100000000000
+```
+
+### Step C4: Upgrade verify (prove data-identical)
+
+```bash
+SOURCE_DB_URL="postgresql://localhost:5433/pre" \
+  TARGET_DB_URL="postgresql://localhost:5434/post" \
+  bun start upgrade verify
+```
+
+**What it does:** Compares the pre-upgrade copy (at `SOURCE_DB_URL`) and the upgraded cluster
+(at `TARGET_DB_URL`) using chunked-checksum reconcile. Also checks extension versions, auth
+schema row sanity, and md5-role status. Exit 0 = data-identical, exit 1 = divergence found.
+
+**Expected output (pass):**
+```
+VERIFY PASSED -- all tables checksum-identical
+Extensions: 3/3 versions match
+Auth schema: 2 tables, 142 rows, no issues
+```
+
+**Expected output (fail):**
+```
+RECONCILE FAILED -- 1 bucket mismatch
+  Table public.users: row id=42 hash_diff
+  Extension pgjwt: source has 1.0, target has 1.1
+✗ VERIFY FAILED
+```
+
+---
+
+## Command Reference
+
+Every command listed here. Run any of these with `bun start <command>`.
+
+### Migration pipeline
+
+```bash
+# Readiness checklist: connection shape, wal_level, replica identity, extension versions,
+# cross-schema FKs, foreign replication slots, custom GUC overrides.
+# --source-only skips target checks (use when target isn't created yet)
+bun start doctor --source-only
+```
+
+```bash
+# Read-only hard-gate checks (subscribe grant, replication capacity, replica identity).
+# Throws on failure.
+bun start preflight
+```
+
+```bash
+# Prepare the target: enable extensions + restore roles + schema from source.
+# Preview by default; --confirm applies the changes.
+# --all-schemas: include Supabase managed schemas (auth/storage/...)
+# --with-auth-data: also load auth schema row data (FK pre-step)
+# --out-dir <path>: directory for dumped SQL files (default: ledger)
+bun start bootstrap --confirm
+```
+
+```bash
+# Create publication + slot + subscription on target. Starts the initial copy.
+bun start replicate
+```
+
+```bash
+# Poll initial-sync state + WAL-bloat watchdog. Shows per-table copy progress.
+# Run until all tables show 'ready'.
+bun start watch
+```
+
+```bash
+# Checksum source vs target. Chunked mode (256 buckets) by default.
+# --mode full: single aggregate (small tables only)
+# --buckets <n>: bucket count (default: 256)
+# --max-examples <n>: max divergent rows to report (default: 20)
+# --out-dir <path>: directory for reconcile JSON report (default: ledger)
+bun start reconcile
+```
+
+```bash
+# Drain lag to 0, resync owned sequences, drop subscription.
+# --max-lag-wait <sec>: seconds to wait for lag to drain (default: 300)
+# --out-dir <path>: directory holding the translated-schema sign-off manifest (default: ledger)
+bun start cutover
+```
+
+```bash
+# Drop subscription/slot/publication safely. Idempotent.
+bun start teardown
+```
+
+### Verification
+
+```bash
+# Post-migration health gate: run Supabase advisors on the target.
+# --fail-on <level>: gate threshold (error | warn | info, default: error)
+# --out-dir <path>: directory for the verify JSON report (default: ledger)
+# --json: emit result as JSON on stdout
+bun start verify
+```
+
+### Config and infra (Supabase only)
+
+```bash
+# Copy non-data config via Management API (auth, realtime, postgrest, storage, pooler).
+# Secrets stripped by default.
+# --dry-run: diff only, do not apply
+bun start config-sync --dry-run
+```
+
+```bash
+# Copy billable infra (compute size, PITR/IPv4, disk, backup schedule).
+# Preview by default; --confirm applies (changes the bill).
+bun start provision --confirm
+```
+
+```bash
+# Move a project into another org.
+# <org-slug>: target org slug
+# <token>: claim token from the source org
+# Preview by default; --confirm performs the claim.
+bun start claim <org-slug> <token> --confirm
+```
+
+### Edge Functions and Storage (Supabase only)
+
+```bash
+# Transfer Edge Functions from source to target.
+# --dry-run: print commands only
+bun start functions --dry-run
+```
+
+```bash
+# Push storage objects from local directory to target.
+# <localDir>: directory containing storage objects to upload
+# --dry-run: print commands only
+bun start storage ./storage-dir --dry-run
+```
+
+### Schema translation (non-Postgres sources)
+
+```bash
+# Draft target Postgres DDL from MySQL information_schema. Never auto-applies.
+# --out-dir <path>: directory for target-schema.sql + decisions manifest (default: ledger)
+# --apply: also apply the drafted DDL to the TARGET (mutates it)
+# --sign-off: ratify the existing draft so cutover may proceed
+# --json: emit draft as JSON on stdout
+bun start translate --out-dir ledger
+```
+
+### Autonomous run (CI / Lambda)
+
+```bash
+# Execute the pipeline end-to-end. Exit 0 iff all phases through the requested stop pass.
+# --through <phase>: stop after this phase (preflight | replicate | watch | reconcile | cutover)
+# --json: emit NDJSON events on stdout (human logs to stderr)
+# --confirm-writes-stopped: required to allow --through cutover
+# --max-lag-wait <sec>: cutover lag-drain wait (default: 300)
+bun start run --through reconcile --json
+```
+
+```bash
+# Cutover is destructive and refused unless you assert writes are stopped:
+bun start run --through cutover --confirm-writes-stopped
+```
+
+### Status (one-shot snapshot)
+
+```bash
+# One-shot replication snapshot for a scheduled watcher.
+# --json: emit a single JSON object on stdout
+# --require-synced: exit non-zero unless all tables are ready
+bun start status --json
+```
+
+### Migration guide (knowledge base)
+
+```bash
+# Enablement playbook for a migration source.
+# <target>: managed Postgres provider (azure, supabase, ...) or heterogeneous engine (mysql, sqlserver)
+# --role: limit to 'source' or 'target' role
+# --json: emit the guide as JSON on stdout
+bun start guide supabase
+```
+
+```bash
+bun start guide mysql
+```
+
+### Knowledge base maintenance
+
+```bash
+# Flag KB items whose guidance hasn't been re-verified recently.
+# --max-age-days <n>: staleness threshold (default: 90)
+# --json: emit drift report as JSON on stdout. Exit 1 if stale items found.
+bun start kb drift
+```
+
+### Upgrade rehearsal (PG major-version upgrade)
+
+```bash
+# Read-only major-upgrade readiness audit of the source.
+# --to <major>: target Postgres major version (default: 17)
+# --db-url <url>: source connection string (default: SOURCE_DB_URL)
+# --copy-mbps <n>: assumed disk copy throughput for downtime estimate (default: 100)
+# --fixed-overhead-sec <n>: assumed fixed platform overhead in seconds (default: 900)
+bun start upgrade doctor --to 17
+```
+
+```bash
+# Dump roles + schema + data of the source into a local directory.
+# --db-url <url>: source connection string (default: SOURCE_DB_URL)
+# --out-dir <path>: capture output directory (default: capture)
+# --max-gb <n>: refuse to capture above this size unless --force (default: 10)
+# --force: capture even above --max-gb
+# --all-schemas: include Supabase-managed schemas
+# --with-auth-data: also dump auth schema row data separately
+bun start upgrade capture --out-dir capture --max-gb 10
+```
+
+```bash
+# Docker lab: time a real pg_upgrade --link N times on production-like data.
+# --from <major>: source Postgres major version (default: 15)
+# --to <major>: target Postgres major version (default: 17)
+# --runs <n>: pg_upgrade timing runs (default: 3)
+# --capture-dir <path>: capture directory from `upgrade capture`
+# --seed-gib <n>: fixture + size-targeted seed instead of a capture (GiB)
+# --image <flavor>: lab image flavor (auto | pgdg | supabase, default: auto)
+# --from-image <ref>: supabase/postgres image for old major (supabase flavor)
+# --to-image <ref>: supabase/postgres image for new major (supabase flavor)
+# --prod-bytes <n>: production DB size in bytes (extrapolated downtime estimate)
+# --keep: keep lab containers running afterwards (for upgrade verify)
+# --clean: tear down the lab containers and exit
+# --work-dir <path>: lab scratch directory (default: .upgrade-lab)
+bun start upgrade lab --capture-dir capture --runs 3 --keep
+```
+
+```bash
+# Prove the upgraded cluster is data-identical via chunked-checksum reconcile.
+# --include-managed: also diff Supabase-managed schemas (auth/storage/...)
+# --out-dir <path>: directory for reconcile JSON report (default: ledger)
+# --max-examples <n>: max divergent rows to report per table (default: 20)
+bun start upgrade verify
+```
+
+```bash
+# The upgrade group also responds to the `pgupgrade` alias:
+bun start pgupgrade doctor --to 17
+bun start pgupgrade capture --out-dir capture --max-gb 10
+bun start pgupgrade lab --capture-dir capture --runs 3
+bun start pgupgrade verify
+```
+
+```bash
+# And the `rehearse upgrade` group (same subcommands, nested under rehearse):
+bun start rehearse upgrade doctor --to 17
+bun start rehearse upgrade capture --out-dir capture --max-gb 10
+bun start rehearse upgrade lab --seed-gib 0.5
+bun start rehearse upgrade verify
+```
+
+### Sandbox (throwaway Supabase pair for rehearsal)
+
+```bash
+# Create a throwaway Supabase source+target pair, seed the source,
+# write migrate.sandbox.yaml + .env.sandbox.
+# --org <id>: Supabase org slug (required)
+# --rows <n>: documents to seed on the source (default: 3000)
+# --payload <bytes>: approx payload bytes per document (default: 2000)
+# --src-region <r>: source region (default: eu-central-1)
+# --tgt-region <r>: target region (default: eu-west-1)
+bun start sandbox up --org <org-id>
+```
+
+```bash
+# Check sandbox status.
+bun start sandbox status
+```
+
+```bash
+# Delete both sandbox projects + remove the generated files.
+bun start sandbox down
+```
+
+### Rehearsal harness (test rig)
+
+```bash
+# Live replication/reconcile against a throwaway Docker Postgres pair.
+bun start rehearse integration
+```
+
+```bash
+# Seed source data for rehearsal (batched, concurrent, server-side generation).
+# --rows <n>: row count (default: 100000)
+# --payload <bytes>: approx payload bytes per row (default: 6000)
+bun start rehearse seed --rows 100000 --payload 6000
+```
+
+```bash
+# Seed to a target size in GiB.
+# --gib <n>: target table size (default: 10)
+# --payload <bytes>: approx payload bytes per row (default: 6000)
+# --batch <rows>: rows per insert batch (default: 50000)
+# --concurrency <n>: parallel insert batches (default: 4)
+bun start rehearse seed-size --gib 10 --payload 6000
+```
+
+```bash
+# Full scale rehearsal: seed-to-size -> run -> fault gate -> teardown (throwaway pair).
+# --gib <n>: target source size (default: 10)
+# --payload <bytes>: approx payload bytes per row (default: 6000)
+# --batch <rows>: rows per insert batch (default: 1000)
+# --concurrency <n>: parallel insert batches (default: 4)
+# --chaos <scenario>: fault scenario to inject
+# --chaos-arg <value>: argument for the chaos scenario
+bun start rehearse run --gib 10
+```
+
+```bash
+# Inject a fault scenario into the rehearsal pair.
+# <scenario>: drop-replica-identity | lose-row | corrupt-row | stall-subscriber |
+#             desync-sequence | tsearch-drift
+# --arg <value>: scenario argument (table / subscription name)
+bun start rehearse chaos lose-row
+```
+
+```bash
+# Drive continuous write load with an append-only id ledger.
+# --ledger <path>: ledger file path (default: ledger/written_ids.log)
+# --interval <ms>: ms between inserts (default: 50)
+# --duration <sec>: stop after N seconds (default: run until Ctrl-C)
+bun start rehearse writer --ledger ledger/written_ids.log
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `GSSAPI negotiation error` or `unsupported version` when running `bootstrap` | Local `pg_dump`/`psql` version is older than the source server's major version. The client library uses GSSAPI negotiation, which fails when the versions don't match. | Install a newer postgres client: `brew install postgresql@17` (macOS), `apt install postgresql-client-17` (Debian/Ubuntu). The local version only needs to be >= the source version. |
+| `doctor` reports `NOT READY` -- pooler detected in SOURCE_DB_URL | You set `SOURCE_DB_URL` to the pooler host (`*.pooler.supabase.com`). The pooler cannot stream logical replication. | Change `SOURCE_DB_URL` to the **direct** host (`db.<ref>.supabase.co:5432`). If you have no IPv6, set `SOURCE_REPLICATION_URL` to the direct host and keep `SOURCE_DB_URL` on the pooler (Option C). |
+| `doctor` reports `NOT READY` -- cannot reach direct host | Your machine has no IPv6 route to the direct host, and the project does not have the IPv4 add-on. | Run from an IPv6-capable host (Option A) or enable the IPv4 add-on in the dashboard (Option B, ~$6/mo). |
+| `replicate` fails with `ERROR: insert or update on table "users" violates foreign key constraint "fk_user_id"` on `auth.users` | A table in your replication list has a foreign key into `auth.users`, but the target's `auth.users` is empty. Every row is rejected. | Before running `replicate`, load auth data onto the target: `bun start bootstrap --confirm --with-auth-data`. `doctor` prints this advice. |
+| After cutover, a custom login role cannot connect to the target | Database roles are dumped without passwords (`pg_dumpall --roles-only --no-role-passwords`). The role exists on the target but has no password. | Reset the password on the target: `ALTER ROLE <name> WITH PASSWORD '<new-password>';` |
+| `upgrade doctor` warns about roles using `md5` passwords | The source uses `md5` password encryption, which is deprecated (or removed) on the target major version. After upgrade, these roles cannot authenticate. | Change each role to use `scram-sha-256`: `ALTER ROLE <name> WITH PASSWORD '<password>';` (this automatically upgrades to scram-sha-256). |
+| `doctor` reports extension version mismatch between source and target | An extension is installed on both sides but at different versions. The target may have a newer version that is not backward-compatible. | Update the extension on the target: `ALTER EXTENSION <name> UPDATE TO '<version>';` or match the source version. |
+| `watch` aborts: `WAL watchdog: retained WAL exceeds limit` | The replication slot is retaining too much WAL on the source, filling up disk space. The watchdog aborts to prevent the source from running out of disk. | Either increase the watchdog limit (`watchdog.maxRetainedWalMb` in config) or speed up the initial copy (check for slow tables, especially those with STORED generated columns). |
+| `provision` fails with `capacity` error | The target region does not have capacity at the requested compute size. | Try a smaller compute size, or choose a different region. Check capacity before the migration window. |
+| `pg_cron` jobs fire on the target before cutover, modifying data that should not be touched yet | The target already has `pg_cron` enabled and the cron jobs from the source schema were restored by `bootstrap`. The jobs start running immediately on the target. | Before running `bootstrap`, pause cron jobs at the watermark. Add cron jobs to the target only **after** cutover. `doctor` warns about `cron.job` if it detects it. |
+| `pgsodium` / vault root key not carried by dump/restore | The `pgsodium` root key is stored outside the database (in the Supabase platform) and is not included in any dump file. | Copy the key via the API: `GET /pgsodium` -> `PUT /pgsodium`. Only needed if you use column encryption / Vault. |
+| Initial copy is very slow (e.g. ~11 MiB/s instead of ~80 MiB/s) | A table has a STORED generated column (e.g. a `tsvector` column for full-text search). Generated columns are recomputed per row on the subscriber during the initial copy, which is CPU-bound. Measured: **~7x slower** with the generated column. | For very large tables, define the generated column as a plain column on the target during sync, then convert it to generated after the copy completes. Or budget the extra hours. |
+| `bootstrap` fails with `permission denied` or `must be superuser` | The database user does not have sufficient privileges to run `pg_dump` / `pg_dumpall` / `psql` with the required flags. On Supabase, the `postgres` role is not a superuser. | `bootstrap` is aware of Supabase's supautils restrictions. It filters out superuser-only objects (event triggers, `COMMENT ON EXTENSION`, publications, FDW grants) that would cause the restore to abort. Ensure you are using the direct host (not pooler) and the `postgres` role. |
+
+---
+
+## Safety Model
+
+sbshift is designed to be **safe by default**. Every command is read-only unless you explicitly
+opt in to mutations.
+
+### Read-only by default
+
+- `doctor`, `preflight`, `reconcile`, `status`, `watch`, `upgrade doctor` -- **never modify anything**.
+- `bootstrap`, `provision`, `claim` -- **preview only** by default. Add `--confirm` to apply.
+- `config-sync` -- **diff only** by default. Add `--dry-run` to preview, then run without it to
+  apply (but even then, secrets are stripped by default).
+- `translate` -- **write only** by default. Add `--apply` to apply to the target.
+- `cutover`, `teardown` -- these are **destructive** by design. `cutover` drops the subscription
+  (replication stops permanently). `teardown` drops the subscription, slot, and publication.
+
+### The confirm gates
+
+| Command | Gate | What happens |
+|---|---|---|
+| `bootstrap` | `--confirm` | Without it, prints the `pg_dump`/`psql` plan and exits. |
+| `provision` | `--confirm` | Without it, prints the billable changes and exits. |
+| `claim` | `--confirm` | Without it, prints the claim preview and exits. |
+| `run --through cutover` | `--confirm-writes-stopped` | Refuses to cutover unless you assert writes are stopped. |
+| `translate` | `--sign-off` | Refuses to cutover (heterogeneous) until the schema draft is signed off. |
+
+### The rollback point of no return
+
+The migration is **lossless** up until the moment you repoint your application to the target
+database. Before that:
+
+- **Phase A (before cutover):** The source is still taking writes. The replication slot and
+  subscription can be torn down with `teardown`. **No data loss.**
+- **Phase B (after cutover, app NOT yet repointed):** Writes are stopped. The source has all
+  data. The target has all data up to the cutover point. You can restart the migration or
+  re-point the app to the source. **No data loss.**
+- **Phase C (after app repointed):** The target is now taking writes. The source still has
+  pre-cutover data but is missing post-cutover writes. **This is the point of no return.**
+  Rolling back to the source loses every write the target took.
+
+### Where logs are written
+
+- All commands write a log file to `logs/<command>-<timestamp>.log` in the repo directory.
+- The `reconcile` report writes to `ledger/reconcile-<timestamp>.json`.
+- The `verify` report (with `--json`) writes to the configured `--out-dir` (default: `ledger/`).
+- Error output goes to stderr. Use `--json` on `run`, `status`, `verify`, `translate` to get
+  machine-readable output on stdout.
+
+---
+
+## Non-Supabase migrations
+
+The replication engine is plain Postgres -- the integration suite runs it against vanilla
+`postgres:16` containers with zero Supabase involvement. To migrate any PG15+ -> PG15+ pair
+(self-hosted to self-hosted, self-hosted to Supabase, same-region tier change, project split):
+
+- **Required:** source has `wal_level=logical`; the target role can `CREATE SUBSCRIPTION`;
+  the schema (DDL) is loaded on the target first; connection strings are **direct** (not a
+  transaction pooler).
+- **Use:** `doctor`, `bootstrap`, `preflight`, `replicate`, `watch`, `reconcile`, `cutover`,
+  `teardown`, `status`, `run` -- all engine-only and Supabase-agnostic.
+- **Skip:** `config-sync` (no-ops without `SUPABASE_ACCESS_TOKEN`), `functions`
+  (`functions.enabled: false`), `storage` (`storage.buckets: []`).
+
+---
 
 ## Why this exists
 
@@ -44,535 +921,35 @@ fills the data-movement gap and reminds you of the rest:
 |---|---|---|
 | Schema / DDL | `bootstrap` (or `supabase db push` / `pg_dump --schema-only`) | `bootstrap --confirm` does extensions + roles + schema |
 | **Table data, low-downtime** | native logical replication | **`replicate` + `watch`** |
-| Sequences | `pg_dump --data-only --table='*_seq'` | `cutover` reminds you (N/A for uuid PKs) |
+| Sequences | resync at cutover | `cutover` resyncs every owned sequence |
 | Storage objects | `supabase storage cp` | `storage` wrapper |
 | Edge Functions | `supabase functions download/deploy` | `functions` wrapper |
-| Project config (Auth/Realtime/…) | Management API | **`config-sync`** (TS port; +SSL, network-restrictions opt-in) |
-| Integration secrets (SMTP/OAuth/SMS/hooks, Edge-Function env) | Management API | `config-sync` opt-in (`secrets` / `projectSecrets`) |
-| JWT signing secret / API keys | nothing — new project = new keys | never copied (not on any synced endpoint) |
-| Org settings / members / roles | nothing — read-only in the API | not migratable; re-invite the team by hand |
-| Post-migration health gate | Management API advisors | **`verify`** (fails on RLS/PK/etc. lints) |
-| Compute size / PITR / IPv4 / disk / backup schedule | Management API (billable) | **`provision`** (preview + gate; `--confirm` to apply) |
-| Move project to another org | Management API claim token | **`claim`** (preview + gate; `--confirm` to move) |
-| Custom domain / pgsodium key / read replicas | — | not automated (DNS-coupled / footgun / no enumerate API) — by hand |
+| Project config (Auth/Realtime/...) | Management API | `config-sync` (secrets opt-in) |
+| JWT signing secret / API keys | nothing -- new project = new keys | never copied |
+| Post-migration health gate | Management API advisors | `verify` (fails on RLS/PK/etc. lints) |
+| Compute size / PITR / IPv4 / disk / backup schedule | Management API (billable) | `provision` (preview + gate) |
+| Move project to another org | Management API claim token | `claim` (preview + gate) |
 
-## When this tool does NOT apply
+---
 
-Logical replication streams **live WAL**, so the source must be running with
-`wal_level=logical`. A **paused** project — especially one paused **> 90 days** (no longer
-restorable via Studio) — cannot stream WAL. That's a wrong-tool condition, not an in-flight
-hazard: use Supabase's offline path instead — download the database backup + Storage objects
-from Project Overview and restore them into a new project
-([Restore project after 90-day pause](https://supabase.com/docs/guides/troubleshooting/restore-project-after-90-days-pause)).
-That path reuses the same building blocks this tool wraps (`supabase storage cp` for objects,
-the Management-API config copy that `config-sync` is a TS port of), so `config-sync`,
-`functions`, and `storage` here remain useful even on the backup-restore route.
+## Testing & Rehearsal
 
-## Prerequisites
-
-| Tool | Version | Needed for |
-|---|---|---|
-| [Bun](https://bun.sh) | ≥ 1.3 | runs the CLI directly from TypeScript — **no build step**. `bin` in `package.json` points at `src/cli.ts`. Node.js is **not** supported. |
-| `supabase` CLI | ≥ 2.x | `config-sync`, `functions`, `storage`, and the auth/roles/schema dump-restore pre-step |
-| `psql` + `pg_dump` | ≥ 15 (match the source major, e.g. 17) | restoring roles/schema/auth onto the target; loading migrations |
-| Docker + `docker compose` | v2 | **only** for the rehearsal harness and `test:integration` — not for a real migration |
-
-The replication host must reach the **direct** Postgres hosts (IPv6, or the IPv4 add-on) — see
-the connection note below. Runtime deps (via `bun install`): `commander`, `postgres`, `yaml`,
-`zod`. Dev: `@biomejs/biome`, `typescript`, `@types/bun`.
-
-## Getting started
+Four validation tiers:
 
 ```bash
-git clone https://github.com/erfianugrah/sbshift.git && cd sbshift
-bun install                                           # commander, postgres, yaml, zod
-cp migrate.config.example.yaml migrate.config.yaml    # set source/target refs + tables
-cp .env.example .env                                  # DIRECT connection strings + PAT
-
-bun start doctor --source-only                        # verify readiness (no target needed yet)
+bun test                  # 1. unit       -- pure logic, no DB, always runs
+bun run test:integration  # 2. integration -- live replication + fault injection vs a Docker PG pair
+bun run test:scale        # 3. scale      -- volume + safety-gate harness (Docker)
+bun run test:live <org>   # 4. live       -- real throwaway Supabase projects (costs money)
 ```
 
-Secrets live only in `.env` (connection strings, access token); the YAML is non-secret and
-commit-safe. Then follow **[`docs/RUNBOOK.md`](docs/RUNBOOK.md)**.
-
-Development commands:
-
-```bash
-bun test                  # unit suite (fast, no DB)
-bun run test:integration  # live replication/reconcile vs a throwaway Postgres pair (needs Docker)
-bun run test:scale        # 1M-row stress harness (needs Docker); WRITE_LOAD / negative modes below
-bun run test:live <org>   # end-to-end against real throwaway Supabase projects (costs money)
-bun run typecheck         # tsc --noEmit
-bun run check             # biome format + lint
-```
-
-For a **hands-on** rehearsal (drive the pipeline yourself against a real but throwaway Supabase
-pair), use the `sandbox` command instead of the fully-automated `test:live` harness:
-
-```bash
-bun start sandbox up --org <org-id>   # create src+tgt, seed source, write migrate.sandbox.yaml + .env.sandbox
-bun start -c migrate.sandbox.yaml --env-file .env.sandbox doctor   # then bootstrap --confirm / replicate / watch / reconcile / cutover
-bun start sandbox down                # delete both projects + remove the generated files
-```
-
-`--env-file` makes that file authoritative over your shell environment (and warns when it
-overrides a conflicting variable), so a `SOURCE_DB_URL` left exported in your shell can't
-silently shadow the sandbox and point a run at the wrong database. `--no-env-file` opts out.
-
-### Connection: use direct connections (the IPv6 trap)
-
-**Use a direct connection at both ends** (`db.<ref>.supabase.co:5432`). The pooler
-(`*.pooler.supabase.com`) **cannot stream logical replication** - never point replication at
-it. The direct host is **IPv6-only** unless the project has the
-[IPv4 add-on](https://supabase.com/docs/guides/platform/ipv4-address).
-
-If the box you run `sbshift` from has no IPv6 route, the clean fix is one of:
-
-- **Enable the source's IPv4 add-on** - the direct host then resolves to IPv4 and everything
-  reaches it directly. This is the recommended answer for anyone without IPv6.
-- **Run `sbshift` from an IPv6-capable host** - a VM in the target region is ideal.
-
-There is also a fallback for the narrow case where you have neither IPv6 nor the add-on: point
-`SOURCE_DB_URL`/`TARGET_DB_URL` at the IPv4 **session pooler** (port 5432) and set
-**`SOURCE_REPLICATION_URL`** to the source *direct* host. This does **not** route WAL through the
-pooler - replication is still direct: `SOURCE_REPLICATION_URL` becomes the subscription's
-`CONNECTION`, dialed by the target's walreceiver over Supabase's internal network, while the
-pooler only fronts sbshift's own admin/seed/reconcile queries. It works (`doctor` classifies each
-URL and validates the split), but prefer the IPv4 add-on - the split is a last resort, not the
-recommended path.
-
-## What this tool does NOT replicate — do this FIRST
-
-Logical replication moves **row data for the tables you list**, and nothing else: no DDL, no
-roles, no sequences-as-DDL, no Supabase-managed `auth` / `storage` schemas. For a
-Supabase→Supabase move you must restore those onto the target **before** `replicate`, or the
-initial copy fails — any FK from a replicated table into `auth.users` rejects every row while
-the target's `auth.users` is empty. `doctor` flags any such cross-schema FK.
-
-### `bootstrap` — the automated pre-step
-
-`bootstrap` owns the generic-Postgres part of this (extensions + roles + schema), so you no
-longer hand-run `pg_dump | psql`. It previews by default and only mutates the target with
-`--confirm` (same gate as `provision` / `claim`):
-
-```bash
-bun start bootstrap                 # preview: prints the exact pg_dump/psql commands + planned extensions
-bun start bootstrap --confirm       # enable extensions on target, then restore roles + schema
-```
-
-It runs, in the load-bearing order: enable missing **extensions** (`CREATE EXTENSION IF NOT
-EXISTS`), restore **roles** (lenient — `--no-role-passwords`, tolerates roles that already
-exist), then restore the **schema** atomically (`pg_dump --schema-only` → `psql
---single-transaction --variable ON_ERROR_STOP=1`, stripping the source's own pub/sub and
-owner/ACLs). Dumps land in `--out-dir` (default `ledger/`) for the audit trail. Works for any
-PG15+ pair, Supabase or not — it shells out to the authoritative `pg_dumpall`/`pg_dump`/`psql`,
-it does not reimplement them.
-
-**When the source is Supabase** (auto-detected from the host), `bootstrap` does what
-`supabase db dump` does internally — but with the system `pg_dump` (no Docker):
-
-- **Schema** — excludes the ~27 Supabase-managed schemas (`auth`, `storage`, `extensions`,
-  `graphql`, `realtime`, `vault`, …) that already exist on every Supabase target, AND runs the
-  same post-dump filter `supabase db dump` does: comments out cluster-level / superuser-owned
-  objects a plain `pg_dump` still emits — **event triggers** (`issue_graphql_placeholder`,
-  `pgrst_ddl_watch`, …), the `supabase_realtime` publication, `COMMENT ON EXTENSION`, FDW
-  grants, and pg17's `SET transaction_timeout` — any of which would abort the atomic restore as
-  the non-superuser `postgres`. Makes `CREATE SCHEMA/TABLE` idempotent. Only your app objects
-  (`public`, …) restore. (The event-trigger trap is real: a plain dump aborts on
-  `Non-superuser owned event trigger must execute a non-superuser owned function` — verified
-  against a live Supabase target.)
-- **Roles** — filters out the Supabase reserved roles (`anon`, `authenticated`, `service_role`,
-  `supabase_*`, `postgres`, …) the same way `supabase db dump --role-only` does: their
-  `CREATE`/`ALTER`/`GRANT` lines are commented out, superuser-only attributes
-  (`NOSUPERUSER`/`NOREPLICATION`) stripped, and only supautils-permitted `ALTER ROLE … SET`
-  GUCs (`statement_timeout`, `pgrst.*`, …) kept. This mirrors the canonical `reservedRoles` /
-  `InternalSchemas` lists in the Supabase CLI source (`apps/cli-go/pkg/migration/dump.go`).
-  Without it, the restore would noisily error on every managed-role collision and fail outright
-  on `ALTER ROLE supabase_admin WITH SUPERUSER` (your connection isn't superuser).
-
-Pass `--all-schemas` to disable both exclusions (full dump — for a non-Supabase clone or a
-truly empty target).
-
-**The one remainder `bootstrap` does NOT do is Supabase `auth` / `storage` ROW data** — that's
-the FK trap above. `doctor` prints the exact command when it detects a cross-schema FK; it is
-the Supabase-blessed dump/restore (see
-[Migrating within Supabase](https://supabase.com/docs/guides/platform/migrating-within-supabase/backup-restore)):
-
-```bash
-# from the SOURCE; load auth DATA onto the target with triggers off (the auth.users FK trap)
-supabase db dump --db-url "$SOURCE_DB_URL" --data-only --schema auth -f auth.sql
-psql "$TARGET_DB_URL" --command 'SET session_replication_role = replica' --file auth.sql
-```
-
-(For roles WITH passwords, or `auth`/`storage` schema customizations, see
-`docs/MIGRATION-SCOPE.md` — those stay manual by design.)
-
-> For the **complete, consolidated scope** — every artifact across Supabase's three official
-> migration guides + the Management-API surface, what carries it, and which sbshift command (or
-> manual step) owns it — see **[`docs/MIGRATION-SCOPE.md`](docs/MIGRATION-SCOPE.md)**. It is the
-> exhaustive answer to "what are the *some things* not stored in my database?".
-
-## What's handled for you
-
-The reason to use this over hand-rolled SQL: the failure modes below are already handled, each
-grouped under the command that owns it.
-
-### Safety gates the tool enforces
-
-- **`preflight`** hard-fails before anything is touched on: a published table lacking a
-  PK / unique index / `REPLICA IDENTITY FULL`; a target role that can't `CREATE SUBSCRIPTION`
-  (documented-supported, but verified). It *warns* on under-provisioned capacity — source
-  `max_replication_slots` / `max_wal_senders` headroom, and subscriber `max_worker_processes`
-  / `max_logical_replication_workers` (the managed-Postgres footgun; see Azure below).
-- **`watch`** turns the silent failure modes loud:
-  - **WAL bloat — the most common outage** → aborts if the slot retains more than
-    `watchdog.maxRetainedWalMb` on the source.
-  - **Slot invalidation is unrecoverable** → if the source recycles WAL the subscriber never
-    read (`max_slot_wal_keep_size` exceeded), `wal_status` flips to `lost` and replication is
-    permanently dead. `watch` throws immediately on `wal_status=lost` (rather than spinning)
-    and warns as it leaves `reserved`/`extended`.
-  - **A stuck subscription fails silently** → an apply/tablesync worker that error-loops
-    (constraint violation, type mismatch, conflict) leaves a table below `srsubstate='r'`
-    forever. `watch` reads `pg_stat_subscription_stats` and warns when
-    `apply_error_count`/`sync_error_count` are *rising*, and when the subscription has **no
-    running worker** (`pid` null = disabled/crashed).
-  - **A transient blip won't kill a multi-hour watch** → tolerates up to 5 *consecutive*
-    transient poll errors (the server-side copy keeps running); deliberate aborts (slot lost,
-    WAL watchdog, sync timeout) always propagate immediately.
-- **`cutover`** verifies writes are actually stopped → it samples the source WAL LSN twice and
-  counts active write-shaped client backends; if WAL is still advancing it warns loudly that
-  draining to lag=0 may never finish and post-cutover writes will be lost. (Autovacuum moves
-  WAL too, so it's a strong signal, not a hard stop — stop your app's writes first.)
-- **`reconcile`** only trusts a drained slot → reconciling while the source still has
-  un-replicated in-flight rows yields spurious `missing_on_target` diffs, so it checks the
-  slot's un-confirmed WAL and warns if lag > 0 (run it post-cutover). Long table scans use
-  `withRetry`, which retries only connection-shaped errors (`08xxx`/`57P0x` SQLSTATEs +
-  connection messages), never SQL errors.
-- **`doctor`** catches the structural traps → the cross-schema `auth.users` FK (its data must
-  exist on the target before the copy), and a published table missing from
-  `pg_subscription_rel` (added to the publication after the subscription existed = silently not
-  replicating; re-run `replicate` to `REFRESH PUBLICATION`). It also diffs `extversion` (not
-  just presence) for extensions installed on both sides - a version jump can silently change
-  behaviour or leave an extension with no forward `ALTER EXTENSION ... UPDATE` path at all
-  (`pg_net`, `wrappers`, `pg_cron`, `pg_repack` get an extra risk note) - and lists any logical
-  replication slot on the source that isn't its own (an unrelated CDC/sync consumer can hold
-  WAL retention hostage; better to know about it before `replicate`, not mid-run).
-
-### Postgres realities it handles for you
-
-- **`FOR ALL TABLES` needs superuser** → always creates an empty publication and `ADD TABLE`
-  explicitly.
-- **`copy_data = true`** → the subscription does a consistent initial copy; no fragile
-  `pg_dump --snapshot` dance (a SQL-created slot can't export a snapshot anyway).
-- **Generated columns** (e.g. a STORED `tsvector`) are **excluded from the reconciliation
-  hash** (hashing them causes false mismatches) and are **not free during the initial copy** —
-  recomputed per row on the subscriber, so a heavy one CPU-bottlenecks the copy. Measured:
-  **~11 MiB/s with the gen-column vs ~80 MiB/s raw seed (~7× slower)**. For very large ones,
-  define them as plain on the target during sync and convert to generated *after* the copy, or
-  budget the hours. `watch` shows a live copy `%`.
-- **Logical replication does NOT carry sequence values** → after the copy a serial/identity
-  sequence is stuck at its post-schema-load value, so the next insert collides with a
-  replicated row. `cutover` discovers every sequence `OWNED BY` a replicated column (serial
-  *and* `IDENTITY`), reads its final value on the write-stopped source, and `setval`s it on the
-  target. No-op for uuid/text PKs.
-- **Teardown order** → disable → `SET (slot_name = NONE)` → drop subscription → drop slot →
-  drop publication, or it hangs. `teardown` does this in order, idempotently.
-- **Stable reconcile hash across regions** → row hashes render `row::text`, which depends on
-  `TimeZone`/`DateStyle`/`IntervalStyle`/`extra_float_digits`/`bytea_output`. Since source and
-  target are different projects, every connection in both pools pins these GUCs identically
-  (and sets `statement_timeout=0` so a multi-minute full-table scan isn't killed).
-
-### Your calls (the tool can't make them)
-
-- **Never re-enable writes on the source after cutover** (split-brain) — `cutover` says so.
-- **Rollback has a point of no return** → lossless before you repoint the app (step 9e); after
-  that, rolling back to the source loses every write the target took. `docs/RUNBOOK.md` §12 has
-  the per-phase decision tree + an optional reverse-replication escape hatch.
-- **Define abort thresholds before cutover** → the tool owns the data-plane gates (WAL
-  watchdog, lag-drain deadline, `reconcile` verdict, apply-error count); your dashboards own the
-  app-tier gates (5xx, p95, connection saturation). `docs/RUNBOOK.md` §9 maps both.
-- **New project = new JWT secret + API keys** → existing user sessions/JWTs invalidate (users
-  re-login) and the app's `SUPABASE_URL` + anon/service keys change. `config-sync` copies
-  settings; by default it strips secrets. Auth **integration** secrets (SMTP/OAuth/SMS/hooks)
-  and project/Edge-Function secrets can be copied opt-in (`configSync.secrets` /
-  `configSync.projectSecrets`), but the **JWT signing secret + API keys are never copied** —
-  they live on endpoints this tool doesn't call. Always `--dry-run` first to confirm the API
-  shapes before applying.
-
-## Runbook
-
-**Full step-by-step: [`docs/RUNBOOK.md`](docs/RUNBOOK.md)** — the connectivity decision, the
-auth/roles/extensions dump-restore pre-step, the billable target-creation step, and
-abort/rollback. The block below is the quick reference.
-
-```bash
-# 0a. readiness checklist — connection shape (pooler vs direct), reachability,
-#     wal_level, replica identity, reconcile hashColumns ↔ live schema, stale
-#     slots, row counts, and (when it exists) the target's grant + schema.
-#     Tolerant of a not-yet-created target; add --source-only to skip it.
-bun start doctor --source-only
-
-# 0b. read-only sanity — versions, wal_level, subscribe grant, replica identity
-bun start preflight
-
-# 1. prepare the TARGET first (logical replication does NOT carry DDL):
-#    a) extensions + roles + schema, automated + confirm-gated:
-bun start bootstrap            # preview the pg_dump/psql plan
-bun start bootstrap --confirm  # apply: extensions, then roles, then schema
-#    b) Supabase only: load auth/storage DATA so the FK into auth.users finds
-#       its rows (doctor prints the exact command):
-#       supabase db dump --db-url "$SOURCE_DB_URL" --data-only --schema auth -f auth.sql
-#       psql "$TARGET_DB_URL" --command 'SET session_replication_role = replica' -f auth.sql
-#    c) if you load app migrations by hand instead of (a), skip the pg_cron
-#       schedule migration so the target doesn't run cleanup while both are live:
-#       for f in $(ls migrations/*.sql | grep -v scheduled_jobs); do psql "$TARGET_DB_URL" -f "$f"; done
-
-# 2. stand up replication (publication + slot + subscription; starts initial copy)
-bun start replicate
-
-# 3. watch the initial sync + WAL watchdog until all tables are 'ready'
-bun start watch
-
-# 4. (rehearsal) prove no loss under live write load — see Testing & rehearsal below
-
-# 5. CUTOVER: stop app writes to the source, then:
-bun start cutover            # drains lag to 0, drops the subscription
-#    repoint your app to the target; add cron jobs on the target now.
-
-# 6. copy non-data config via the Management API. Secrets are stripped by
-#    default; opt in (configSync.secrets / projectSecrets) to copy SMTP/OAuth/
-#    SMS/hook + Edge-Function creds. The JWT secret + API keys are NEVER copied.
-bun start config-sync --dry-run   # review the diff
-bun start config-sync
-#    (optional) match billable infra — compute/PITR/IPv4/disk/backup (opt-in):
-bun start provision               # preview; --confirm applies (CHANGES THE BILL)
-
-# 6b. post-migration health gate — fails on RLS/PK/advisor lints on the target
-bun start verify
-
-# 7. teardown replication objects
-bun start teardown
-```
-
-## Autonomous runs (CI / Lambda / cron)
-
-The orchestration lives in the tool, not a wrapper script. `run` executes the pipeline
-end-to-end with machine-readable output and a meaningful exit code; `status` is a one-shot
-health snapshot for a scheduled watcher.
-
-```bash
-# one command, non-interactive; exit 0 iff preflight+replicate+watch+reconcile all pass
-bun start run --through reconcile --json
-
-# cutover is destructive and REFUSED unless you assert source writes are stopped:
-bun start run --through cutover --confirm-writes-stopped
-
-# poll-once snapshot for a watcher; --require-synced exits non-zero until ready:
-bun start status --json
-bun start status --require-synced    # use in a wait loop
-```
-
-With `--json`, `run` emits NDJSON on stdout (`phase_start` / `phase_end` / `summary`) while
-human logs go to stderr, so stdout stays parseable. Example GitHub Action (the runner must
-reach the **direct** hosts — IPv6 or the IPv4 add-on):
-
-```yaml
-name: migrate
-on: { workflow_dispatch: {} }
-jobs:
-  migrate:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install
-      - run: bun start run --through reconcile --json
-        env:
-          SOURCE_DB_URL: ${{ secrets.SOURCE_DB_URL }}
-          TARGET_DB_URL: ${{ secrets.TARGET_DB_URL }}
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-```
-
-## Non-Supabase migrations
-
-The replication engine is plain Postgres — the integration suite runs it against vanilla
-`postgres:16` containers with zero Supabase involvement. To migrate any PG15+ → PG15+ pair
-(self-hosted↔self-hosted, self-hosted↔Supabase, same-region tier change, project split):
-
-- **Required, as always:** source has `wal_level=logical`; the target role can
-  `CREATE SUBSCRIPTION`; the schema (DDL) is loaded on the target first; connection strings are
-  **direct** (not a transaction pooler).
-- **Use:** `doctor`, `bootstrap`, `preflight`, `replicate`, `watch`, `reconcile`, `cutover`,
-  `teardown`, `status`, `run` — all engine-only and Supabase-agnostic. `bootstrap` does the
-  roles/schema/extension pre-step for you (generic `pg_dumpall`/`pg_dump`/`psql`).
-- **Skip:** `config-sync` (no-ops without `SUPABASE_ACCESS_TOKEN`), `functions`
-  (`functions.enabled: false`), `storage` (`storage.buckets: []`). The only manual remainder is
-  Supabase `auth`/`storage` row data — N/A for non-Supabase pairs.
-- `doctor`'s Supabase host heuristics (pooler-vs-direct, IPv6, the `auth.users` trap) degrade
-  to no-ops on a plain host; the wal_level / replica-identity / version / `CREATE SUBSCRIPTION`
-  / schema-loaded / extension-diff checks all still run. Config defaults
-  (`replication.slot`/`publication`/`subscription`) are generic names — set them per env.
-
-### Azure Database for PostgreSQL (Flexible Server)
-
-Flexible Server is plain Postgres 11–17, so it works as a source or target with **no code
-changes** — Microsoft's own minimal-downtime upgrade guide uses the exact
-`publication → slot → subscription` flow this tool automates. Azure-specific prerequisites
-(surfaced by `doctor`/`preflight` where checkable):
-
-- **Server parameters** (portal → Server parameters, then restart): `wal_level=logical`, and on
-  the **subscriber** `max_worker_processes >= 16` — Azure ships a low default and logical
-  apply/table-sync run as background workers, so too few stalls the subscription with
-  `out of background worker slots`. Bump `max_replication_slots` / `max_wal_senders` on the
-  source above the slot count you'll run. `preflight` warns on all of these.
-- **Replication role:** `ALTER ROLE <user> WITH REPLICATION;` — and if it isn't the
-  server-admin account, also `GRANT azure_pg_admin TO <user>;` (plus `LOGIN`).
-- **Network:** the target's walreceiver must reach the source's direct host:5432 (firewall rule
-  / allowed Azure region IP ranges) — same reachability constraint as any direct-connection
-  pair.
-- **Unused-slot auto-drop:** at ≥95% storage (or <5 GiB free) Azure flips the server read-only
-  and **drops idle logical slots** to release WAL — a platform backstop on top of `watch`'s own
-  watchdog. Don't leave a slot without a live subscriber.
-- **HA-enabled source:** before PG17, logical slots are **not** preserved across an HA failover
-  (needs the PG Failover Slots extension; PG17 has native slot sync). Expect to restart
-  replication after a failover.
-
-> **Not** Azure SQL Database / Managed Instance — that's the SQL Server engine (T-SQL), a
-> heterogeneous migration with no Postgres logical replication. Different tool class entirely
-> (Azure DMS / schema conversion); out of scope here.
-
-## Testing & rehearsal
-
-Four validation tiers. The **first two run in CI** (`.github/workflows/ci.yml`: the `test` job
-runs the unit tier; the `integration` job runs the integration tier **and** the scale harness's
-three safety-gate modes under Docker). The scale and live harnesses are the other two.
-
-```bash
-bun test                  # 1. unit       — pure logic, no DB, always runs
-bun run test:integration  # 2. integration — live replication + fault injection vs a Docker PG pair
-bun run test:scale        # 3. scale      — volume + safety-gate harness (Docker)
-bun run test:live <org>   # 4. live       — real throwaway Supabase projects (costs money)
-```
-
-**Unit** (the `test` CI job): zod config parsing + identifier/SQL-injection guards, config-sync
-secret stripping, bucket-diff classification, conn-string builder.
-
-**Integration** (the `integration` CI job, via `bun start rehearse integration`): stands up two
-ephemeral `postgres:16` containers (source `wal_level=logical`) plus a bun runner **on one
-compose network**, runs `test/integration.test.ts`, and tears it all down. It asserts each fault
-is caught: happy-path reconcile clean, `lose-row` → reconcile fails, `corrupt-row` → reconcile
-fails, generated column excluded (clean data still reconciles), `drop-replica-identity` →
-`preflight` rejects. It also exercises the live `cutover` sequence-resync (proving **every** owned
-sequence is set forward, not just the first), `replicate`'s `REFRESH PUBLICATION` pickup of a
-table added after the subscription, and `doctor`'s ready / not-ready verdicts on a clean vs
-missing-schema pair.
-
-> **Why a shared network, not two bare `docker run`s with `localhost`:** `replicate.ts` uses one
-> connection string both for its own libpq connection and as the subscription's `CONNECTION`,
-> which the *target's* walreceiver dials. With `localhost:5432` the target resolves `localhost`
-> to itself, not the source. On a compose network the subscription uses the service-DNS name
-> `source:5432`, which resolves identically from runner and target. To point the tier at your
-> own pair, set `TEST_SOURCE_DB_URL` + `TEST_TARGET_DB_URL` (both reachable under the *same* name
-> from wherever the target runs); without them and without the compose harness, the tier
-> self-skips so a bare `bun test` stays green on the unit tier alone.
-
-### Rehearsal — prove it at real scale on a throwaway pair
-
-Theory passing at 1M rows proves nothing — the failures that matter (slow initial copy holding
-the slot, WAL bloat, lag that never drains, full-scan reconciliation timing out) only show up at
-scale. Emulate the real **on-disk size**, not a row count:
-
-```bash
-# seed to a TARGET SIZE (batched, concurrent, server-side generation)
-bun start rehearse seed-size --gib 200 --payload 6000 --batch 50000 --concurrency 4
-
-# drive continuous write load with an append-only id ledger; leave running THROUGH the migration
-bun start rehearse writer --ledger ledger/written_ids.log
-```
-
-**Chunked reconciliation (prod-grade).** A single `sum(hash)` over a multi-hundred-GB table is a
-synchronized full scan on both sides and only says "differ / match". The default `chunked` mode
-does one scan per side, buckets rows by a hash of their PK, compares N bucket checksums, and
-**drills only the mismatched buckets** to name the exact divergent rows:
-
-```bash
-bun start reconcile                      # chunked, 256 buckets (default)
-bun start reconcile --buckets 1024       # finer drill granularity for very large tables
-bun start reconcile --mode full          # legacy single-aggregate (small tables only)
-```
-
-Output (and the per-bucket report at `ledger/reconcile-<ts>.json`) lists, per divergent row,
-whether it is `missing_on_target`, `extra_on_target`, or `hash_diff`.
-
-**Inject the gotchas yourself.** The point of a rehearsal is to break things on purpose and
-verify the orchestrator notices:
-
-```bash
-bun start rehearse chaos drop-replica-identity   # then: preflight must FAIL
-bun start rehearse chaos lose-row                # then: reconcile reports missing_on_target
-bun start rehearse chaos corrupt-row             # then: reconcile reports hash_diff
-bun start rehearse chaos stall-subscriber        # then: watch's WAL watchdog aborts
-bun start rehearse chaos desync-sequence         # demonstrates the serial-PK collision (uuid is immune)
-bun start rehearse chaos tsearch-drift           # reconcile STILL passes (generated col excluded)
-```
-
-| Scenario | Failure mode emulated | Gate that must catch it |
-|---|---|---|
-| `drop-replica-identity` | UPDATE/DELETE can't replicate | `preflight` ✗ |
-| `lose-row` | dropped row on target | `reconcile` → missing_on_target |
-| `corrupt-row` | silent content drift | `reconcile` → hash_diff |
-| `stall-subscriber` | slot bloats source WAL | `watch` watchdog abort |
-| `desync-sequence` | post-cutover PK collision | manual setval reminder (N/A uuid) |
-| `tsearch-drift` | generated-col config skew | `reconcile` PASSES (guard works) |
-
-Reconciliation is authoritative **after cutover** (writes stopped, lag drained): if the chunked
-checksum matches exactly, nothing was lost — inflight or otherwise. The writer ledger is a
-rehearsal-only extra proof that specifically isolates inflight loss during the initial copy.
-
-### Scale + safety-gate harness (Docker)
-
-`test/scale.harness.ts` builds the deliberately *annoying* 4-table schema (STORED `tsvector`
-gen-column, IDENTITY + composite + no-PK tables, inter-table FKs, GUC-sensitive types,
-unicode/NULLs), seeds it to volume, and runs the real pipeline with per-phase timing. Three
-modes, selected by env flag — each exits non-zero if its expected gate does **not** fire, so
-they double as CI assertions:
-
-```bash
-bun run test:scale         # default: static insert-only bulk copy + reconcile + cutover (ROWS=1M)
-
-# WRITE_LOAD: concurrent INSERT/UPDATE/DELETE on documents + no-PK UPDATE/DELETE churn on the
-# REPLICA IDENTITY FULL audit table run THROUGH the copy + streaming apply; writes stop before
-# cutover; reconcile runs after cutover at lag=0 with a ledger inflight-loss check.
-docker compose -f docker-compose.test.yml run --rm \
-  -e ROWS=200000 -e WRITE_LOAD=1 runner \
-  sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'
-
-# WATCHDOG_FIRE (negative): freeze apply + bloat source WAL → `watch` MUST abort via the WAL watchdog
-# WRITE_THROUGH_CUTOVER (negative): keep writing through cutover → `cutover` MUST fail (lag never drains)
-```
-
-| Mode | What it stresses | Gate that must fire |
-|---|---|---|
-| (default) | initial COPY of the annoying schema at volume | reconcile PASSES |
-| `WRITE_LOAD=1` | concurrent writes + no-PK FULL-identity apply through copy/stream | reconcile PASSES, ledger clean |
-| `WATCHDOG_FIRE=1` | frozen apply bloating source WAL | `watch` → WAL watchdog abort |
-| `WRITE_THROUGH_CUTOVER=1` | writes never stopped at cutover | `cutover` → "lag did not drain" |
-
-The two negative modes are the at-scale complement to the `rehearse chaos` table above: same
-gates (`watch` watchdog, `cutover` lag-drain guard), proven to abort under real load.
-
-## Possible future backend: pgcopydb
-
-`pgcopydb clone --follow` does parallel initial copy + snapshot-consistent catch-up and is
-faster than a single subscription on large data — but it uses the replication protocol as its
-own apply client rather than the Supabase-documented `CREATE SUBSCRIPTION` path. Spike it
-against a throwaway project before betting a real migration on it.
+---
 
 ## Layout
 
 ```
 src/
-  cli.ts              commander entry — one subcommand per step
+  cli.ts              commander entry -- one subcommand per step
   config.ts           zod schema (YAML) + env secrets schema
   db.ts               source/target postgres clients; subscription conn string; withRetry
   mgmt.ts             Supabase Management API client
@@ -588,21 +965,27 @@ src/
     cutover.ts        lag drain + sequence resync + drop subscription
     teardown.ts       safe ordered cleanup
     status.ts         one-shot replication snapshot (for scheduled watchers)
-    config-sync.ts    Management API config copy (auth/realtime/postgrest/storage/pooler
-                      /postgres + ssl-enforcement/network-restrictions/secrets opt-in)
+    config-sync.ts    Management API config copy
     provision.ts      billable infra copy (compute/disk/pitr/ipv4/backup-schedule; confirm-gated)
     verify.ts         post-migration advisor health gate
-    claim.ts          org-level project-claim (move project to another org)
-    sandbox.ts        throwaway Supabase pair for a hands-on rehearsal (up/status/down)
+    claim.ts          org-level project-claim
+    sandbox.ts        throwaway Supabase pair for rehearsal (up/status/down)
     cli-wrappers.ts   supabase functions/storage wrappers
+    translate.ts      MySQL->Postgres schema translation
+  upgrade/
+    doctor.ts         major-upgrade readiness audit
+    capture.ts        dump roles + schema + data for upgrade lab
+    lab.ts            Docker lab: time pg_upgrade N times
+    verify.ts         prove upgraded cluster is data-identical
+    source.ts         source-only connection helpers
   rehearsal/
-    schema.sql        sandbox / rehearse-run fixture (uuid docs + items IDENTITY/generated/composite/no-PK)
+    schema.sql        sandbox / rehearse-run fixture
     seed.ts           seed source data (far-future expiry)
     writer.ts         continuous write load + id ledger
-test/                 *.test.ts (unit) + integration.test.ts (inline itest) + scale/live harnesses
-                      + annoying-schema.ts (their SEPARATE bigint-IDENTITY fixture — see its header)
-docs/RUNBOOK.md       the step-by-step runbook; §9 cutover, §12 rollback
-docs/MIGRATION-SCOPE.md  exhaustive what-migrates/what-doesn't (consolidates the 3 guides)
-docs/GUIDED-MIGRATION.md design: guided knowledge-bearing advisor for heterogeneous → PG/Supabase
-docs/HETEROGENEOUS.md    design: Debezium data plane behind a ReplicationEngine interface
+test/                 *.test.ts (unit) + integration.test.ts + scale/live harnesses
+docs/
+  RUNBOOK.md          the step-by-step runbook
+  MIGRATION-SCOPE.md  exhaustive what-migrates/what-doesn't
+  GUIDED-MIGRATION.md design: guided knowledge-bearing advisor for heterogeneous to PG/Supabase
+  HETEROGENEOUS.md    design: Debezium data plane behind a ReplicationEngine interface
 ```

@@ -12,8 +12,14 @@ For the **exhaustive list of what does and does not migrate** (consolidating Sup
 official guides + the Management-API surface), see **[`docs/MIGRATION-SCOPE.md`](MIGRATION-SCOPE.md)**
 — it answers "what are the *some things* not stored in my database?" completely.
 
+> **Major-version upgrade rehearsal is a different workflow.** If you are rehearsing a Postgres
+> major-version upgrade (the in-place `pg_upgrade` path) rather than moving data to a new
+> project, use `sbshift upgrade doctor|capture|lab|verify` (also `pgupgrade` /
+> `rehearse upgrade`) - no migrate.config.yaml needed. See the README section
+> **Major-version upgrade rehearsal**.
+
 Prerequisites (Bun, the `supabase` CLI, `psql`/`pg_dump`, Docker for the rehearsal) and
-install steps are in the README **Prerequisites** + **Getting started** sections — set those
+install steps are in the README **Prerequisites** + **Getting started** sections - set those
 up before step 1.
 
 ---
@@ -292,6 +298,27 @@ observability stack owns the **app-tier** gates (right). Abort if either trips.
 - `reconcile` reports any mismatch → do **not** complete cutover; investigate.
 - App-tier: sustained 5xx > Y for N min, or DB p95 > X for N min, after repoint → roll back (§12).
 
+### Safety-net checklist -- verify before the freeze
+
+Run through these **before** you stop writes. If any check fails, address it first.
+
+- **Create a named restore point** via the Management API before the freeze.
+  This gives you a known-good recovery target if something goes wrong mid-migration.
+- **Re-check target-region capacity** at the target instance size. If the region is out of
+  capacity at the compute size you need, pick a different size or region.
+- **Pause cron at the watermark.** `doctor` warns about `cron.job` if it detects scheduled
+  jobs. Pause them before `bootstrap` so they don't fire on a half-migrated target.
+  Add them back only after cutover.
+- **Disable `pg_cron`/`pg_net` on the target** until cutover. These extensions fire external
+  actions (HTTP requests, scheduled jobs) immediately as soon as the schema is restored.
+- **Re-password custom login roles.** `bootstrap` restores roles without passwords. Reset
+  each custom login role's password: `ALTER ROLE <name> WITH PASSWORD '<new-password>';`
+- **Storage copy method.** If you have Storage objects, decide whether to use the `storage`
+  command (for S3-protocol-compatible targets) or a manual copy script.
+- **JWT secret / API keys are NEVER copied.** Existing user sessions will invalidate after
+  cutover. Your application must use the new project's keys. Update env vars before
+  repointing the app.
+
 Keep one dashboard view open for migration day: API RPS + p95/p99, 4xx/5xx + timeouts, DB CPU/mem/disk-latency/IOPS, DB connections (+ pooler), and the `sbshift watch`/`status` output (or its `--log-file`).
 
 ```bash
@@ -499,32 +526,54 @@ project becomes a cold standby.
 
 ---
 
+
 ## Command reference (this tool)
 
 | Command | What it does |
 |---|---|
-| `bun start run [--through P] [--json] [--confirm-writes-stopped]` | autonomous pipeline (preflight→replicate→watch→reconcile[→cutover]); exit 0 iff the requested range passed. For CI/Lambda. |
+| `bun start run [--through P] [--json] [--confirm-writes-stopped] [--max-lag-wait SEC]` | autonomous pipeline (preflight->replicate->watch->reconcile[->cutover]); exit 0 iff the requested range passed. For CI/Lambda. |
 | `bun start status [--json] [--require-synced]` | one-shot replication snapshot (sub state, srsubstate, slot active, WAL retained, lag) for a scheduled watcher |
-| `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns ↔ live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded, extension version mismatches, foreign replication slots, custom `pg_db_role_setting` GUC overrides) |
+| `bun start doctor [--source-only]` | automated readiness checklist (connection shape, reachability, wal_level, replica identity, reconcile hashColumns vs live schema, cross-schema FK deps, target version/grant/extensions/schema-loaded, extension version mismatches, foreign replication slots, custom `pg_db_role_setting` GUC overrides) |
 | `bun start preflight` | read-only hard-gate checks; throws on failure |
 | `bun start bootstrap [--confirm] [--all-schemas] [--with-auth-data] [--out-dir P]` | prepare the TARGET: enable extensions + restore roles + schema from source (Supabase-aware role/schema filter); `--with-auth-data` also loads the auth-schema row data (FK pre-step); preview unless `--confirm` |
 | `bun start replicate` | publication + slot + subscription (starts initial copy) |
 | `bun start watch` | poll initial-sync state + WAL-bloat watchdog |
-| `bun start reconcile [--mode chunked\|full] [--buckets N] [--max-examples N]` | checksum source vs target |
-| `bun start cutover [--max-lag-wait SEC]` | drain lag to 0, resync owned sequences, drop subscription |
+| `bun start reconcile [--mode chunked|full] [--buckets N] [--max-examples N] [--out-dir P]` | checksum source vs target |
+| `bun start cutover [--max-lag-wait SEC] [--out-dir P]` | drain lag to 0, resync owned sequences, drop subscription |
 | `bun start teardown` | drop subscription/slot/publication safely (idempotent) |
+| `bun start translate [--out-dir P] [--apply] [--sign-off] [--json]` | draft target Postgres DDL from a non-Postgres source (e.g. MySQL); never auto-applies; `--sign-off` ratifies the draft so cutover may proceed |
 | `bun start config-sync [--dry-run]` | copy non-data config via Management API (secrets stripped) |
-| `bun start verify [--fail-on error\|warn\|info]` | post-migration health gate: run Supabase advisors on the target, fail on lints |
+| `bun start verify [--fail-on error|warn|info] [--out-dir P] [--json]` | post-migration health gate: run Supabase advisors on the target, fail on lints |
 | `bun start provision [--confirm]` | copy billable infra (compute size, PITR/IPv4, disk, backup schedule); preview unless `--confirm` |
 | `bun start claim <org-slug> <token> [--confirm]` | org-level: move a project into another org (preview unless `--confirm`) |
 | `bun start functions [--dry-run]` | transfer Edge Functions (skip if none) |
 | `bun start storage <localDir> [--dry-run]` | push storage objects (skip if none) |
-| `bun start rehearse run --gib N --payload B [--chaos S --chaos-arg T]` | full scale rehearsal in-tool: seed-to-size → run → fault gate → teardown (THROWAWAY pair) |
-| `bun start sandbox up --org <id>` | create a throwaway Supabase source+target pair, seed the source, write `migrate.sandbox.yaml` + `.env.sandbox` — for a hands-on rehearsal (`sandbox status` / `sandbox down` to inspect / delete) |
-| `bun run test:integration` | live replication/reconcile against a throwaway Postgres pair |
+| `bun start guide <target> [--role source|target] [--json]` | enablement playbook for a migration source (managed PG provider or heterogeneous engine) |
+| `bun start kb drift [--max-age-days N] [--json]` | flag KB items whose guidance hasn't been re-verified recently; exit 1 if stale items found |
+| `bun start upgrade doctor [--to MAJOR] [--db-url URL] [--copy-mbps N] [--fixed-overhead-sec N]` | read-only major-upgrade readiness audit of the source |
+| `bun start upgrade capture [--db-url URL] [--out-dir P] [--max-gb N] [--force] [--all-schemas] [--with-auth-data]` | dump roles + schema + data of the source into a local dir (input for `upgrade lab`) |
+| `bun start upgrade lab [--from MAJOR] [--to MAJOR] [--runs N] [--capture-dir P] [--seed-gib N] [--image FLAVOR] [--from-image REF] [--to-image REF] [--prod-bytes N] [--keep] [--clean] [--work-dir P]` | Docker lab: time a real `pg_upgrade --link` N times on production-like data |
+| `bun start upgrade verify [--include-managed] [--out-dir P] [--max-examples N]` | prove the upgraded cluster is data-identical: chunked-checksum reconcile |
+| `bun start pgupgrade doctor [--to MAJOR] [--db-url URL] [--copy-mbps N] [--fixed-overhead-sec N]` | alias for `upgrade doctor` |
+| `bun start pgupgrade capture [--db-url URL] [--out-dir P] [--max-gb N] [--force] [--all-schemas] [--with-auth-data]` | alias for `upgrade capture` |
+| `bun start pgupgrade lab [--from MAJOR] [--to MAJOR] [--runs N] [--capture-dir P] [--seed-gib N] [--image FLAVOR] [--from-image REF] [--to-image REF] [--prod-bytes N] [--keep] [--clean] [--work-dir P]` | alias for `upgrade lab` |
+| `bun start pgupgrade verify [--include-managed] [--out-dir P] [--max-examples N]` | alias for `upgrade verify` |
+| `bun start rehearse upgrade doctor [--to MAJOR] [--db-url URL] [--copy-mbps N] [--fixed-overhead-sec N]` | alias for `upgrade doctor` (nested under rehearse) |
+| `bun start rehearse upgrade capture [--db-url URL] [--out-dir P] [--max-gb N] [--force] [--all-schemas] [--with-auth-data]` | alias for `upgrade capture` (nested under rehearse) |
+| `bun start rehearse upgrade lab [--from MAJOR] [--to MAJOR] [--runs N] [--capture-dir P] [--seed-gib N] [--image FLAVOR] [--from-image REF] [--to-image REF] [--prod-bytes N] [--keep] [--clean] [--work-dir P]` | alias for `upgrade lab` (nested under rehearse) |
+| `bun start rehearse upgrade verify [--include-managed] [--out-dir P] [--max-examples N]` | alias for `upgrade verify` (nested under rehearse) |
+| `bun start rehearse integration` | live replication/reconcile against a throwaway Docker Postgres pair |
+| `bun start rehearse seed [--rows N] [--payload B]` | seed source data for rehearsal (batched, concurrent, server-side generation) |
+| `bun start rehearse seed-size [--gib N] [--payload B] [--batch ROWS] [--concurrency N]` | seed to a target size in GiB |
+| `bun start rehearse run [--gib N] [--payload B] [--batch ROWS] [--concurrency N] [--chaos SCENARIO] [--chaos-arg VALUE]` | full scale rehearsal in-tool: seed-to-size -> run -> fault gate -> teardown (throwaway pair) |
+| `bun start rehearse chaos <scenario> [--arg VALUE]` | inject a fault scenario into the rehearsal pair |
+| `bun start rehearse writer [--ledger P] [--interval MS] [--duration SEC]` | drive continuous write load with an append-only id ledger |
+| `bun start sandbox up --org <id> [--rows N] [--payload B] [--src-region R] [--tgt-region R]` | create a throwaway Supabase source+target pair, seed the source, write `migrate.sandbox.yaml` + `.env.sandbox` for a hands-on rehearsal |
+| `bun start sandbox status` | check sandbox status |
+| `bun start sandbox down` | delete both sandbox projects + remove the generated files |
 
 All commands take `-c <path>` for an alternate config (default `migrate.config.yaml`), and
 `--env-file <path>` to load secrets from a specific file (default `.env` if present). The env
-file is **authoritative over inherited shell variables** — sbshift warns when it overrides a
+file is **authoritative over inherited shell variables** - sbshift warns when it overrides a
 conflicting one, so a stale `SOURCE_DB_URL` exported in your shell can never silently point a
 run at the wrong database. `--no-env-file` uses the inherited environment as-is.

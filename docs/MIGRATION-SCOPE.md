@@ -204,3 +204,55 @@ MANUAL ................ read replicas, custom domain, realtime publications,
                         custom role passwords, supabase_migrations history,
                         auth/storage schema customizations, pgsodium (unless column-encryption)
 ```
+
+## A region move is not data residency
+
+Moving the database to a new region does NOT pin these to that region:
+
+- **Storage objects** are served behind a global CDN which caches signed-URL
+  responses at edge nodes. An expired token does not purge the cached copy.
+- **Realtime** is a globally distributed cluster; its nodes are not confined to
+  the project's database region.
+- **Edge Functions** deploy globally. Regional invocation is a per-request
+  setting (`x-region`), not a project pin -- any region can serve a request.
+- **Platform telemetry and logs** land in a managed analytics backend whose
+  storage region is independent of the project's database region.
+- **Backups, PITR, and WAL archives** have a storage region that should be
+  confirmed with the provider; it may differ from the database region.
+
+If data residency or sovereignty is the stated driver for a migration, set
+those expectations before migrating. Get any compliance wording from legal --
+a region move alone does not guarantee that all derived data stays within that
+region.
+
+## Read replicas as a latency stopgap
+
+For latency-motivated moves, a read replica in the target region can serve as
+an interim stopgap:
+
+- The primary (and thus data residency) stays in the origin region.
+- Replicas inherit the primary's compute size.
+- Failover-to-replica is an upcoming early-access platform feature; until then
+  the replica is read-only and a full migration is still needed for writes.
+
+## Operational safety-net checklist
+
+Before the migration window:
+
+- **Named restore point.** Take a named restore point on the source at the
+  watermark before the freeze, via the Management API
+  (`POST /v1/projects/{ref}/database/backups/restore-point`) - it is the
+  cleanest rollback safety net, and has a matching undo endpoint.
+- **Target-region capacity.** Confirm the target region has capacity at the
+  required instance size via the available-regions endpoint. Re-check close to
+  the migration date -- capacity can change.
+- **Custom LOGIN roles carry no passwords.** A `pg_dumpall --roles-only` dumps
+  roles without passwords by design. Every custom login role must be
+  re-passworded on the target: `ALTER ROLE <name> WITH PASSWORD '<pwd>';`
+- **Storage copy method.** The approach for copying storage objects depends on
+  whether the S3 protocol is enabled on the project. Check the source project's
+  storage settings before planning the object migration.
+- **Management API blind spots.** The Management API exposes no compute tier
+  enumeration (you provide the tier, it accepts or rejects) and no storage
+  object count or byte-total endpoint. Plan the storage migration and compute
+  provisioning from what you know about the source project, not from API queries.

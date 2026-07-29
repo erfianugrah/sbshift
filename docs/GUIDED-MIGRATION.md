@@ -119,12 +119,12 @@ is what unlocks both the guided-run UX and the upstream sync.
 
 ---
 
-## 5. Execution: `sbshift guide <source-engine>`
+## 5. Execution: `bun start guide <source-engine>`
 
 A new command walks the selected playbook:
 
 ```
-sbshift guide mysql --target supabase [--phase source-prep] [--json]
+bun start guide mysql --target supabase [--phase source-prep] [--json]
 ```
 
 For each item in phase order:
@@ -152,14 +152,14 @@ year alone: Neon inbound logical replication went GA, PlanetScale launched Postg
 Aurora added `aurora.enhanced_logical_replication`. So `provenance` is not decoration — it
 drives a maintenance loop.
 
-- **`sbshift kb drift`** — for each item, re-fetch `provenance.source`, hash the cited
+- **`bun start kb drift`** — for each item, re-fetch `provenance.source`, hash the cited
   section, diff against `upstreamHash`. For PG-family + AWS items the source is
   **docs.erfi.io**, which is already a refreshed mirror (`aws-rds` 1388 files, `aws-aurora`
   988, `aws-dms` 291) updated by the existing "Update Docs" cron — so drift-check is a
   `docs_grep` against a path you control, not a fragile scrape of a vendor marketing site.
   For Debezium/MySQL items the source is the upstream URL (`debezium.io`, `dev.mysql.com`).
 
-- **`sbshift kb sync`** — surfaces drifted items for human review. It does **not**
+- **`kb sync`** — surfaces drifted items for human review. It does **not**
   auto-rewrite guidance from a doc diff (that is the same untrustworthy-automation trap as
   auto-applying a guessed schema). A human ratifies the change and bumps `lastSynced` +
   `upstreamHash`.
@@ -460,9 +460,9 @@ cloud source; review the printed guided decisions before a real cutover.
 
 1. Extract today's `doctor` checks into `Playbook` data items in `src/kb/` — mechanical
    refactor, no behaviour change. Valuable immediately, including for the PG-family work.
-2. Add `sbshift guide <source-engine>` — walks the playbook, runs detect → guide → verify,
-   gates per §5.
-3. Add `sbshift kb drift` / `sbshift kb sync` wired to docs.erfi.io + vendor URLs (§6).
+2. Add `bun start guide <source-engine>` - walks the playbook, runs detect -> guide -> verify,
+   gates per S5.
+3. Add `bun start kb drift` / `kb sync` wired to docs.erfi.io + vendor URLs (S6).
 4. The heterogeneous **data plane** (Debezium behind a `ReplicationEngine` interface) is
    orthogonal — see [`HETEROGENEOUS.md`](HETEROGENEOUS.md). The **knowledge plane** in this
    doc is the larger differentiator and ships independently.

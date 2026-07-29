@@ -19,3 +19,10 @@ ledger.root/
 # sandbox command artifacts (throwaway Supabase pair)
 migrate.sandbox.yaml
 .sbshift-sandbox.json
+
+# upgrade rehearsal lab artifacts (throwaway)
+.upgrade-lab/
+capture/
+
+# loop harness run report (local state)
+.pi/harness-report.json
