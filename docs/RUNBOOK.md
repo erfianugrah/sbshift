@@ -39,7 +39,7 @@ answers up front is what makes the rest of the runbook mechanical.
 | Generated columns | `\d+ <table>` | STORED generated columns are excluded from the reconcile hash automatically |
 | **Cross-schema FKs into `auth`** | inspect FKs | **referenced rows (e.g. `auth.users`) must exist on the target BEFORE the copy** or every child row is FK-rejected |
 | Owned sequences (serial/IDENTITY) | `\d <table>` | resynced at cutover; none needed for uuid/text PKs |
-| Storage buckets / objects | dashboard | replicated separately (`storage` step) or skipped if none |
+| Storage buckets / objects | dashboard | NOT carried (managed schema) - recreate buckets; the `storage` step pushes objects but auto-creates buckets **private** (restore visibility) |
 | Edge Functions | dashboard | transferred separately (`functions` step) or skipped if none |
 | Non-default extensions | `select extname, extversion from pg_extension;` | must be enabled on the target before the schema load; `doctor` also flags an installed extension whose version DIFFERS between source and target |
 | Custom LOGIN roles | `\du` | passwords are not dumped — reset them manually on the target if any |
@@ -206,7 +206,8 @@ TGT="<TARGET_POOLER_URL>"
 # 6a. dump roles, schema (DDL+RLS+functions), and the auth-schema DATA from the source
 supabase db dump --db-url "$SRC" -f roles.sql  --role-only
 supabase db dump --db-url "$SRC" -f schema.sql
-supabase db dump --db-url "$SRC" -f auth.sql   --data-only --schema auth --use-copy
+supabase db dump --db-url "$SRC" -f auth.sql   --data-only --schema auth --use-copy \
+  -x auth.schema_migrations   # SELECT-only for postgres on managed targets; see below
 
 # 6b. enable non-default extensions on the target FIRST (dashboard → Database → Extensions,
 #     or SQL). `doctor` in step 7 lists exactly which are still missing — enable those.
@@ -221,6 +222,15 @@ psql \
   --file auth.sql \
   --dbname "$TGT"
 ```
+
+`auth.schema_migrations` is the one auth table where managed targets grant the `postgres`
+role SELECT only (verified 2026-07-30: every other auth table gets full DML) — restoring a
+dump that includes it fails with `permission denied for table schema_migrations`, and the
+target already carries its own migration ledger. `bootstrap --with-auth-data` excludes it
+automatically (pg_dump `--exclude-table-data`); the manual path above passes `-x` explicitly. If `bootstrap`
+fails partway, re-running it re-plans the schema restore against tables that now exist -
+recover by running the printed auth-data dump/restore commands by hand instead of re-applying
+the whole schema.
 
 If `psql` errors on `supabase_admin` ownership or a `cli_login_postgres` grant, see the
 "Troubleshooting" notes in the upstream guide
@@ -355,9 +365,15 @@ bun start config-sync
 This copies Auth / Realtime / PostgREST / Storage / pooler settings via the Management API
 (needs `SUPABASE_ACCESS_TOKEN` in `.env`). By default **secrets are stripped** — re-enter SMTP /
 OAuth / JWT secrets on the target by hand in the dashboard (or opt in below). `config-sync` is a
-TS port of `sync_supabase_config.sh`; its **read paths + `--dry-run` are validated read-only
-against the live Management API**, but the apply (write) path has not been exercised live — so
-always `--dry-run` and review the diff before applying.
+TS port of `sync_supabase_config.sh`; read paths, `--dry-run`, and the apply (write) path have
+all been exercised against the live Management API (2026-07-30: Auth / Realtime / Pooler /
+PostgREST / Storage / project secrets applied and re-read on the target). Still `--dry-run`
+first and review the diff — it is the last chance to catch an unwanted overwrite.
+
+Note on the Auth section: two hook families (`hook_password_verification_attempt`,
+`hook_mfa_verification_attempt`) are plan-gated — PATCHing them at all earns HTTP 402 on orgs
+without the entitlement, even when disabled. `stripAuth` drops those families unless they are
+enabled; an enabled gated hook passes through and fails loudly if the target org cannot take it.
 
 **Optional sections + secret copying** (all opt-in under `configSync` in the config):
 
@@ -419,7 +435,7 @@ domain, pgsodium key, read replicas, CLI-only GUCs) lives in the canonical scope
 > Update the app's database URL + keys to the new project as part of step 9e.
 
 Storage objects and Edge Functions, if any, transfer separately:
-- **Storage:** `bun start storage <localDir>` (skip if no buckets).
+- **Storage:** `bun start storage <localDir>` (skip if no buckets). The push auto-creates missing buckets but lands them **private** - restore public visibility (`update storage.buckets set public = true where id = '<bucket>';`) or public URLs return 400 "Bucket not found" (verified 2026-07-30).
 - **Edge Functions:** the `functions` step (skip / `functions.enabled: false` if none).
 - **OAuth providers:** re-enter each provider's client id/secret on the target's Auth settings.
 

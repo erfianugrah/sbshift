@@ -33,7 +33,7 @@ These live in Postgres, so any data-plane method moves them — but with caveats
 | Table data + indexes | `data.sql` / clone / **sbshift replicate** | — |
 | RLS policies | part of schema | `verify` asserts they're enabled on the target post-cutover |
 | DB roles, permissions, users | `bootstrap` (`pg_dumpall --roles-only --no-role-passwords`) / clone | **custom LOGIN roles lose passwords** — reset by hand (`ALTER USER … WITH PASSWORD`). For a Supabase source, `bootstrap` filters out the reserved roles (`anon`/`authenticated`/`supabase_*`/`postgres`/…) the same way `supabase db dump --role-only` does — only your app roles restore |
-| Auth user data (`auth` schema: accounts, hashed passwords) | `auth.sql` data dump / clone | sbshift: dump+restore `auth` BEFORE replicate (the `auth.users` FK trap) |
+| Auth user data (`auth` schema: accounts, hashed passwords) | `auth.sql` data dump / clone | sbshift: dump+restore `auth` BEFORE replicate (the `auth.users` FK trap); the dump excludes `auth.schema_migrations` - the one auth table that is SELECT-only for `postgres` on managed targets, and the target has its own ledger (verified 2026-07-30) |
 | Sequences | DDL in schema | **values don't replicate** → sbshift `cutover` resyncs every owned sequence |
 | `supabase_migrations` schema (CLI migration history) | only if you dump it **separately** | `supabase db dump --schema supabase_migrations` (schema + data) |
 | `auth` / `storage` schema customizations (your triggers, RLS) | only if diffed separately | `supabase db diff --schema auth,storage` then apply |
@@ -58,15 +58,15 @@ sbshift command for each.
 |---|---|---|---|---|
 | 1 | Edge Functions (code) | `functions` | `supabase functions download/deploy` | import maps + `deno.json` are **not** downloaded — re-add by hand |
 | 2 | Edge Function / project secrets (env) | `config-sync` (`projectSecrets`, opt-in) | `GET/POST /secrets` | plaintext; dry-run redacts |
-| 3 | Auth settings (providers, SMTP host, hooks, rate limits, redirect URLs) | `config-sync` (`auth`) | `/config/auth` | — |
+| 3 | Auth settings (providers, SMTP host, hooks, rate limits, redirect URLs) | `config-sync` (`auth`) | `/config/auth` | plan-gated hook families (password/MFA verification attempt) are dropped when disabled - PATCHing them at all earns HTTP 402 on orgs without the entitlement (verified 2026-07-30); enabled ones pass through and fail loud |
 | 4 | Auth **integration** secrets (SMTP pass, OAuth client secrets, SMS tokens, hook secrets) | `config-sync` (`secrets`, opt-in) | `/config/auth` | off by default |
 | 5 | **JWT signing secret + API keys (anon/service)** | **never** | — | new project = new keys **by design**; all sessions invalidate, app must re-key + users re-login |
 | 6 | Realtime settings | `config-sync` (`realtime`) | `/config/realtime` | — |
 | 7 | Realtime **publications** (which tables broadcast) | manual | dashboard → Database → Publications | re-enable per table |
 | 8 | PostgREST / Data API settings | `config-sync` (`postgrest`) | `/postgrest` | `jwt_secret` is excluded intentionally (new project keeps new signing material) |
 | 9 | Storage config (file size limit, etc.) | `config-sync` (`storage`) | `/config/storage` | — |
-| 10 | Storage buckets (configs) | metadata via dump; objects step below | `/storage/buckets` | bucket rows come with the DB dump |
-| 11 | **Storage objects (actual S3 files)** | `storage` | JS copy script / Colab | the dump carries bucket+file *metadata* but **not the bytes** |
+| 10 | Storage buckets (configs) | NOT migrated - the schema dump excludes the managed `storage` schema (verified 2026-07-30: `storage.buckets` empty on the target after bootstrap) | `/storage/buckets` | recreate by hand, or let the `storage` push auto-create them - they land **private** regardless of source visibility; restore `public = true` after |
+| 11 | **Storage objects (actual S3 files)** | `storage` | JS copy script / Colab | bytes are never in any dump; on the sbshift track the bucket/object metadata does not arrive either (the *clone* track carries metadata but not bytes) |
 | 12 | Postgres config (API-exposed GUCs) | `config-sync` (`dbPostgres`, opt-in) | `/config/database/postgres` | only the API-exposed subset (see B for the SQL-level ones) |
 | 13 | Pooler (Supavisor) config | `config-sync` (`dbPooler`) | `/config/database/pooler` | — |
 | 14 | Compute instance size | `provision` (`compute`) | `PATCH /billing/addons` | **billable**; under-provisioning the target risks cutover load |
@@ -176,7 +176,7 @@ source 404 = SAML off = skip; a target 404 on POST = enable SAML on the target f
 |---|---|---|
 | Edge Functions | code | ✅ `functions` |
 | Edge Functions | secrets (env) | 🟡 `config-sync` (`projectSecrets`) |
-| Storage | bucket configs | ✅ metadata via dump |
+| Storage | bucket configs | ✋ recreate (the `storage` push auto-creates them **private** - restore visibility) |
 | Storage | objects (S3 bytes) | ✅ `storage` |
 | Storage | settings (size limit, image transform) | ✅ `config-sync` (`storage`) |
 | Storage | S3 access keys | 🚫 new — generate on target |
