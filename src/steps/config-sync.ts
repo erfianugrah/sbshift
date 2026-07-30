@@ -98,9 +98,7 @@ export function stripAuth(
     const family = /^(hook_.+)_(?:enabled|uri|secrets)$/.exec(k)?.[1];
     if (
       family &&
-      ["hook_password_verification_attempt", "hook_mfa_verification_attempt"].includes(
-        family,
-      ) &&
+      ["hook_password_verification_attempt", "hook_mfa_verification_attempt"].includes(family) &&
       !src[`${family}_enabled`]
     )
       continue;
