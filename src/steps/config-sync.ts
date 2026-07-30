@@ -88,6 +88,22 @@ export function stripAuth(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(src)) {
+    // These two hook families are plan-gated: PATCHing them at all earns
+    // HTTP 402 on orgs without the entitlement - even with enabled=false
+    // (verified live 2026-07-30). A DISABLED gated hook carries no config
+    // worth copying, so drop the family unless it is enabled; an enabled one
+    // passes through and fails loudly if the target org cannot take it
+    // (correct). Non-gated hook families keep the M-7 doctrine: disabled or
+    // not, their non-credential config is copied.
+    const family = /^(hook_.+)_(?:enabled|uri|secrets)$/.exec(k)?.[1];
+    if (
+      family &&
+      ["hook_password_verification_attempt", "hook_mfa_verification_attempt"].includes(
+        family,
+      ) &&
+      !src[`${family}_enabled`]
+    )
+      continue;
     if (copySecrets || !isAuthSecret(k)) out[k] = v;
   }
   return out;

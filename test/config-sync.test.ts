@@ -96,6 +96,30 @@ describe("stripAuth — secrets must never be copied", () => {
     expect(out).not.toHaveProperty("hook_custom_access_token_secret");
     expect(out).not.toHaveProperty("hook_custom_access_token_headers");
   });
+
+  test("plan-gated hook families are dropped when disabled (HTTP 402 guard)", () => {
+    // the input fixture has hook_mfa_verification_attempt with no _enabled key
+    // (falsy) - the whole family must be dropped, not just its secrets
+    expect(out).not.toHaveProperty("hook_mfa_verification_attempt_secrets");
+    const gated = stripAuth({
+      hook_mfa_verification_attempt_enabled: false,
+      hook_mfa_verification_attempt_uri: null,
+      hook_mfa_verification_attempt_secrets: "x",
+      hook_password_verification_attempt_enabled: false,
+      hook_password_verification_attempt_uri: null,
+      site_url: "https://example.com",
+    });
+    expect(Object.keys(gated)).toEqual(["site_url"]);
+  });
+
+  test("plan-gated hook families pass through when ENABLED (fail loud at the API)", () => {
+    const gated = stripAuth({
+      hook_mfa_verification_attempt_enabled: true,
+      hook_mfa_verification_attempt_uri: "https://example.com/mfa",
+    });
+    expect(gated.hook_mfa_verification_attempt_enabled).toBe(true);
+    expect(gated.hook_mfa_verification_attempt_uri).toBe("https://example.com/mfa");
+  });
 });
 
 describe("stripAuth copySecrets=true — integration creds are kept", () => {
