@@ -16,6 +16,7 @@
     "check": "biome check --write .",
     "lint": "biome check .",
     "test:live": "bun run test/live.harness.ts",
+    "verify:claims": "bash scripts/verify-claims.sh",
     "test:scale": "docker compose -f docker-compose.test.yml run --rm -e ROWS=1000000 runner sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'"
   },
   "dependencies": {

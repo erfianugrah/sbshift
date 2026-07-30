@@ -30,6 +30,11 @@ jobs:
       - name: Unit tests
         run: bun test
 
+      # Source + docs claims the lexicanum e2e guides make about this repo.
+      # No network, no transcript - the timeless regression subset.
+      - name: Verify source + docs claims
+        run: bash scripts/verify-claims.sh
+
   # Real logical replication against a throwaway Postgres pair (Docker), plus the
   # negative-path safety-gate assertions. ubuntu-latest ships docker + compose v2.
   integration:
