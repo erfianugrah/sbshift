@@ -346,6 +346,11 @@ export function dumpAuthDataCmd(
     "--data-only",
     "--no-owner",
     "--no-privileges",
+    // auth.schema_migrations is the one auth table where managed targets grant
+    // the postgres role SELECT only (all others get full DML) - copying it
+    // fails with "permission denied for table schema_migrations", and the
+    // target already carries its own migration ledger. Never copy it.
+    "--exclude-table-data=auth.schema_migrations",
     ...schemas.flatMap((s) => [`--schema=${s}`]),
     "-d",
     sourceUrl,

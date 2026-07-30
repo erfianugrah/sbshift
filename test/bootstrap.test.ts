@@ -143,12 +143,19 @@ describe("dump/restore command builders", () => {
       "--data-only",
       "--no-owner",
       "--no-privileges",
+      "--exclude-table-data=auth.schema_migrations",
       "--schema=auth",
       "-d",
       SRC,
       "-f",
       "/o/auth.sql",
     ]);
+  });
+
+  test("dumpAuthDataCmd: excludes auth.schema_migrations (SELECT-only for postgres on managed targets)", () => {
+    expect(dumpAuthDataCmd(SRC, "/o/auth.sql")).toContain(
+      "--exclude-table-data=auth.schema_migrations",
+    );
   });
 
   test("dumpAuthDataCmd: multiple dep schemas emit one --schema each, no --disable-triggers", () => {
