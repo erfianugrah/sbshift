@@ -162,7 +162,10 @@ async function crossCheck(livePaths: Record<string, unknown>): Promise<void> {
   const onlyLive = [...live].filter((p) => !docs.has(p));
   const onlyDocs = [...docs].filter((p) => !live.has(p));
 
-  // Endpoints sbshift actually uses that disagree between the two = strongest signal.
+  // Endpoints sbshift actually uses that disagree between the two = the only
+  // actionable signal; warn on those. A divergence confined to paths sbshift
+  // never calls (e.g. a new analytics endpoint mid-deploy) is upstream's
+  // business - log it as info, not a CI warning annotation.
   const affected = ENDPOINTS.filter((e) => live.has(e.path) !== docs.has(e.path)).map(
     (e) => e.path,
   );
@@ -176,7 +179,9 @@ async function crossCheck(livePaths: Record<string, unknown>): Promise<void> {
     const parts: string[] = [];
     if (onlyLive.length) parts.push(`${onlyLive.length} live-only`);
     if (onlyDocs.length) parts.push(`${onlyDocs.length} docs-only`);
-    warn(`live and docs specs diverge (${parts.join(", ")}) - docs copy may be lagging a deploy`);
+    console.log(
+      `cross-check: live and docs specs diverge on paths sbshift does not use (${parts.join(", ")}) - informational only`,
+    );
   } else {
     console.log(`cross-check: live and docs spec agree (${live.size} paths)`);
   }
