@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { Command } from "commander";
+import pkg from "../package.json" with { type: "json" };
 import {
   applyEnvFile,
   type Config,
@@ -41,9 +42,9 @@ import { upgradeLab } from "./upgrade/lab.ts";
 import { connectSourceOnly, resolveSourceUrl } from "./upgrade/source.ts";
 import { upgradeVerify } from "./upgrade/verify.ts";
 
-const { version } = JSON.parse(
-  readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-) as { version: string };
+// JSON import (not a runtime readFileSync of ../package.json) so `bun build
+// --compile` inlines the version into the single-file binary.
+const { version } = pkg;
 
 const program = new Command();
 program

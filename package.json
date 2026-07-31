@@ -10,6 +10,7 @@
   },
   "scripts": {
     "start": "bun run src/cli.ts",
+    "build": "bun build ./src/cli.ts --compile --outfile sbshift",
     "test": "bun test",
     "test:integration": "bun start rehearse integration",
     "typecheck": "tsc --noEmit",

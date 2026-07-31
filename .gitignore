@@ -26,3 +26,7 @@ capture/
 
 # loop harness run report (local state)
 .pi/harness-report.json
+
+# compiled binary
+/sbshift
+/sbshift-bun-*

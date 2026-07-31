@@ -24,12 +24,14 @@ import { parseEnvFile } from "../config.ts";
 import { connect, type Db } from "../db.ts";
 import { log } from "../log.ts";
 import type { MgmtApi } from "../mgmt.ts";
+// Text import (not a runtime read of a source-relative path) so `bun build
+// --compile` embeds the schema into the single-file binary.
+import SCHEMA_SQL from "../rehearsal/schema.sql" with { type: "text" };
 import { seed } from "../rehearsal/seed.ts";
 
 const STATE_FILE = ".sbshift-sandbox.json";
 const CONFIG_FILE = "migrate.sandbox.yaml";
 const ENV_FILE = ".env.sandbox";
-const SCHEMA = new URL("../rehearsal/schema.sql", import.meta.url);
 
 const TABLES = [
   "public.documents",
@@ -106,7 +108,7 @@ async function seedSource(
   const { source, close } = await acquireSource(conns, token);
   try {
     log.step("loading sandbox schema on the SOURCE");
-    await source.unsafe(readFileSync(SCHEMA, "utf8"));
+    await source.unsafe(SCHEMA_SQL);
     log.step(`seeding source (${rows.toLocaleString()} documents)`);
     await seed(source, rows, payloadBytes);
     // Seed the IDENTITY table too so its owned sequence advances — this is what
