@@ -48,6 +48,18 @@ jobs:
       - run: bun build ./src/cli.ts --compile --outfile sbshift
       - run: ./sbshift --version
 
+  # Assert every Supabase Management API (method, path) sbshift calls still
+  # exists in the live OpenAPI spec - fail loudly on upstream rename/removal
+  # instead of a runtime 404 mid-migration.
+  api-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+      - run: bun run scripts/check-api-drift.ts
+
   # Real logical replication against a throwaway Postgres pair (Docker), plus the
   # negative-path safety-gate assertions. ubuntu-latest ships docker + compose v2.
   integration:

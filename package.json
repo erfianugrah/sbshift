@@ -1,6 +1,6 @@
 {
   "name": "sbshift",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Typed CLI orchestrator for cross-region Supabase project migration via logical replication.",
   "license": "MIT",
   "author": "Erfi Anugrah <erfi.anugrah@gmail.com>",
@@ -18,6 +18,7 @@
     "lint": "biome check .",
     "test:live": "bun run test/live.harness.ts",
     "verify:claims": "bash scripts/verify-claims.sh",
+    "check:api": "bun run scripts/check-api-drift.ts",
     "test:scale": "docker compose -f docker-compose.test.yml run --rm -e ROWS=1000000 runner sh -c 'bun install --frozen-lockfile && bun run test/scale.harness.ts'"
   },
   "dependencies": {
