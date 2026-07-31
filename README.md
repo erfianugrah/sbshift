@@ -116,6 +116,17 @@ cd sbshift
 bun install
 ```
 
+### Compiled binary (optional - no Bun needed at runtime)
+
+```bash
+bun run build              # -> ./sbshift (standalone, embeds the Bun runtime; gitignored)
+mv sbshift ~/.local/bin/   # or anywhere on your PATH
+sbshift doctor             # same UX as `bun start doctor`
+```
+
+Rebuild after code changes. Tagged releases (`v*`) also publish prebuilt
+linux/darwin x64+arm64 binaries via `.github/workflows/release.yml`.
+
 ### Environment variables
 
 Copy the example env file and fill in your values. **Every value is a secret -- never commit it.**
