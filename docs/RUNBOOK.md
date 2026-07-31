@@ -108,6 +108,37 @@ bun run test:integration   # needs Docker; ~6s
 For a scale rehearsal that emulates real on-disk size + live write load, see the README
 **Rehearsal** section (`bun start rehearse seed-size` / `rehearse writer` / `rehearse run`).
 
+### Driving the rehearsal pair from the host (no in-docker runner)
+
+`docker-compose.rehearsal.yml`'s runner service exists so the subscription's CONNECTION
+(`source:5432`) resolves identically from the runner and from the target's walreceiver.
+To drive the pair with the CLI / compiled binary directly from the host instead, split
+the URLs by who dials them:
+
+- `SOURCE_DB_URL` / `TARGET_DB_URL` - dialed by sbshift itself (seed, doctor,
+  reconcile). Use the published host ports: `localhost:55432` / `localhost:55433`.
+- `SOURCE_REPLICATION_URL` - dialed by the TARGET's walreceiver. `localhost` would
+  resolve to the target container itself, so use the compose network gateway IP with
+  the published source port (reachable from inside the container AND from the host):
+  `postgresql://postgres:pw@<gateway>:55432/postgres?sslmode=disable`. Get the gateway
+  via `docker network inspect sbshift-rehearsal_default --format '{{(index .IPAM.Config 0).Gateway}}'`.
+
+Three gotchas, all learned the hard way:
+
+- **Docker Desktop on WSL**: the Windows Hyper-V `excludedportrange`
+  (`netsh int ip show excludedportrange protocol=tcp`) can reserve 55432/55433, and
+  publishing then fails with a `forwards/expose ... 500`. Remap with an override file -
+  use the `!override` tag, because plain port overrides APPEND and `!reset` WIPES:
+  `ports: !override ["56432:5432"]`.
+- **Fresh pair per `rehearse run`**: the seed is deterministic and teardown drops the
+  publication/slot/subscription but does NOT truncate the target tables. A second run
+  on a dirty pair dies with `duplicate key value violates unique constraint` in a
+  tablesync error loop. `docker compose ... down -v` between runs.
+- **`ledgerPath` needs the writer**: the example config's `reconcile.ledgerPath`
+  inflight-loss proof reads `ledger/written_ids.log`, which only `rehearse writer`
+  writes. Drop the ledger keys from the config for a plain `rehearse run`, or reconcile
+  fails with ENOENT after otherwise passing.
+
 ### Validating the safety gates (prove they FIRE, not just that they exist)
 
 Before trusting a real migration, confirm the data-plane gates actually abort when they
