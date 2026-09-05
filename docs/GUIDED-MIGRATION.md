@@ -1,6 +1,6 @@
 # Guided migration — design for heterogeneous → Postgres / Supabase
 
-> Status: design spec, no code yet. This document describes how sbshift extends from a
+> Status: implemented - the `translate`, `guide` and `kb` subcommands ship in the CLI (see `bun start --help`); this document is the design record and may lag the code. This document describes how sbshift extends from a
 > PG→PG logical-replication orchestrator into a **guided, knowledge-bearing migration
 > advisor** that subsumes the per-engine prep knowledge so the operator follows *one
 > checked tool* instead of a dozen vendor-doc tabs.

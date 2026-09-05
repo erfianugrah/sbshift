@@ -1,6 +1,6 @@
 # Heterogeneous data plane — Debezium behind a `ReplicationEngine` interface
 
-> Status: design spec, no code yet. Companion to [`GUIDED-MIGRATION.md`](GUIDED-MIGRATION.md).
+> Status: implemented - the `translate`, `guide` and `kb` subcommands ship in the CLI (see `bun start --help`); this document is the design record and may lag the code. Companion to [`GUIDED-MIGRATION.md`](GUIDED-MIGRATION.md).
 > That doc covers the **knowledge-and-guidance** plane (the ~70% that is checked, sourced,
 > fail-closed prep playbooks). This doc covers the **data** plane (the ~30% that is a new
 > replication engine) and the decision to **borrow** it rather than build it.
