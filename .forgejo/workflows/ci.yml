@@ -97,7 +97,14 @@ jobs:
       - name: Bootstrap tier (real pg_dump/psql)
         run: |
           set -euo pipefail
-          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          # The runner image is Ubuntu 22.04 (distro client = 14, older than the
+          # PG16 servers below, so pg_dump refuses). Install 16 from PGDG.
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt jammy-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client-16
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          pg_dump --version
           docker run -d --name boot-src -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:16 -c wal_level=logical
           docker run -d --name boot-tgt -e POSTGRES_PASSWORD=pw -p 55433:5432 postgres:16
           export TEST_SOURCE_DB_URL="postgresql://postgres:pw@127.0.0.1:55432/postgres"
@@ -169,3 +176,11 @@ jobs:
 
       - name: 'SQL Server to Postgres harness (beta - gating)'
         run: bun run test/heterogeneous/harness-sqlserver.ts
+
+      - name: Debezium container logs (on failure)
+        if: failure()
+        run: |
+          docker ps -a --format '{{.Names}} {{.Status}}' || true
+          for c in $(docker ps -a --format '{{.Names}}' | grep -E 'dbz|debezium' || true); do
+            echo "=== $c"; docker logs --tail 80 "$c" 2>&1 || true
+          done
