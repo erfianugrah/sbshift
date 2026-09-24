@@ -133,6 +133,12 @@ async function main() {
     failed = true;
     console.error(`\nHARNESS FAIL ✗ — ${e instanceof Error ? e.message : String(e)}`);
     console.error("inspect: docker logs sbshift-dbz-dbz");
+    // Teardown removes the container, so print its log before it goes.
+    try {
+      console.error(execSync("docker logs --tail 120 sbshift-dbz-dbz 2>&1", { encoding: "utf8" }));
+    } catch {
+      /* container may never have started */
+    }
   } finally {
     await pg.end({ timeout: 5 });
     console.log("── teardown ──");
