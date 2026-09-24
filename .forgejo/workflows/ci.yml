@@ -64,6 +64,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Private Docker daemon for this job. The runner's shared host socket
+      # resolves bind mounts and published ports on the router, not in this
+      # container, so tests that mount the workspace or dial localhost need
+      # their own daemon (runs as root under a privileged runner; vfs avoids nested overlay).
+      - name: Start job-private dockerd
+        run: |
+          sh -c 'dockerd --host=unix:///tmp/dind.sock --data-root=/tmp/dind-data --storage-driver=vfs >/tmp/dockerd.log 2>&1 &'
+          for i in $(seq 1 30); do docker -H unix:///tmp/dind.sock info >/dev/null 2>&1 && break; sleep 1; done
+          echo "DOCKER_HOST=unix:///tmp/dind.sock" >> "$GITHUB_ENV"
+          docker -H unix:///tmp/dind.sock info --format 'private dockerd: {{.ServerVersion}} {{.Driver}}'
       - name: Install bun
         run: curl -fsSL https://bun.sh/install -o /tmp/bun.sh && bash /tmp/bun.sh "bun-v1.3.13" && echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
@@ -137,6 +147,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Private Docker daemon for this job. The runner's shared host socket
+      # resolves bind mounts and published ports on the router, not in this
+      # container, so tests that mount the workspace or dial localhost need
+      # their own daemon (runs as root under a privileged runner; vfs avoids nested overlay).
+      - name: Start job-private dockerd
+        run: |
+          sh -c 'dockerd --host=unix:///tmp/dind.sock --data-root=/tmp/dind-data --storage-driver=vfs >/tmp/dockerd.log 2>&1 &'
+          for i in $(seq 1 30); do docker -H unix:///tmp/dind.sock info >/dev/null 2>&1 && break; sleep 1; done
+          echo "DOCKER_HOST=unix:///tmp/dind.sock" >> "$GITHUB_ENV"
+          docker -H unix:///tmp/dind.sock info --format 'private dockerd: {{.ServerVersion}} {{.Driver}}'
       - name: Install bun
         run: curl -fsSL https://bun.sh/install -o /tmp/bun.sh && bash /tmp/bun.sh "bun-v1.3.13" && echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
